@@ -753,10 +753,161 @@ def report_breaks(out_dir: Path) -> dict:
     return res
 
 
+def report_kalman(out_dir: Path) -> dict:
+    """Time-varying hedge ratios out of sample: a Kalman filter and a rolling regression against
+    the fixed formation ratio, as hedges and inside the strategy."""
+    from pt.data import SECTORS, SYMBOLS
+    from pt.kalman import fit_ratio, kalman_hedge, rolling_hedge
+    from pt.search import scan
+    from pt.strategy import run, summary
+
+    res = {}
+    logp = np.log(prices()[SYMBOLS])
+    sc = scan(logp, SECTORS, range(2010, 2027))
+    picks = sc[sc["same_sector"]]
+
+    # 1. hedge quality on the traded pairs: daily moves the hedge leaves over, test year
+    rows, ratios, example = [], [], None
+    for y, g in picks.groupby("year"):
+        px = logp.loc[f"{y - 2}-01-01" : f"{y}-12-31"].ffill()
+        first = len(px.loc[: f"{y - 1}-12-31"])
+        for r in g.nsmallest(20, "pvalue").itertuples():
+            la, lb = px[r.a].to_numpy(), px[r.b].to_numpy()
+            fa, fb = la[:first], lb[:first]
+            a0 = fa.mean() - r.beta * fb.mean()
+            rv = float(np.var(fa - a0 - r.beta * fb))
+            q = fit_ratio(fa, fb, rv, (a0, r.beta))
+            ratios.append(q)
+            kb = kalman_hedge(la, lb, q, rv, (a0, r.beta))["beta"]
+            rb = rolling_hedge(la, lb, 120)
+            da, db = np.diff(la)[first - 1 :], np.diff(lb)[first - 1 :]
+            rows.append(
+                {
+                    "fixed": np.std(da - r.beta * db),
+                    "Kalman": np.std(da - kb[first:] * db),
+                    "rolling": np.std(da - rb[first:] * db),
+                    "Kalman beta sd": np.std(kb[first:]),
+                    "rolling beta sd": np.std(rb[first:]),
+                }
+            )
+            if y == 2026 and (r.a, r.b) == ("HDFCBANK", "ICICIBANK"):
+                example = (px.index, r.beta, kb, rb, first)
+    d = pd.DataFrame(rows)
+    res["hedge left over, median daily sd"] = (
+        f"fixed {100 * d['fixed'].median():.2f}%, Kalman {100 * d['Kalman'].median():.2f}%, "
+        f"rolling 120-day {100 * d['rolling'].median():.2f}%; Kalman below fixed for "
+        f"{(d['Kalman'] < d['fixed']).mean():.0%} of {len(d)} pair-years, rolling for "
+        f"{(d['rolling'] < d['fixed']).mean():.0%}"
+    )
+    res["hedge ratio movement in the test year, median sd"] = (
+        f"Kalman {d['Kalman beta sd'].median():.3f}, rolling {d['rolling beta sd'].median():.2f}"
+    )
+    res["Kalman q/r chosen on formation data"] = ", ".join(
+        f"{k:g}: {v}" for k, v in pd.Series(ratios).value_counts().items()
+    )
+
+    # 2. inside the strategy
+    variants = {
+        "fixed (finding 4)": {"hedge": "fixed"},
+        "rolling 120-day ratio": {"hedge": "rolling"},
+        "Kalman ratio, 60-day z": {"hedge": "kalman"},
+        "Kalman signal, enter at 2": {"hedge": "kalman signal"},
+        "Kalman signal, enter at 1": {"hedge": "kalman signal", "entry": 1.0},
+    }
+    out = {}
+    for k, kw in variants.items():
+        r = run(logp, picks, **kw)
+        s_ = summary(r["net"])
+        y = r.groupby("year")["net"].apply(lambda x: (1 + x).prod() - 1)
+        out[k] = s_
+        res[k] = (
+            f"net {s_['annual']:+.2%}, Sharpe {s_['sharpe']:.2f}, drawdown "
+            f"{s_['max drawdown']:.1%}, {r.groupby('year')['trades'].first().mean():.0f} trades "
+            f"a year, {(y > 0).sum()} of {len(y)} years up"
+        )
+    grid = (0.75, 1.0, 1.25, 1.5, 2.0)
+    sharpe = {h: [] for h in ("fixed", "kalman signal")}
+    for h in sharpe:
+        for e in grid:
+            r = run(logp, picks, hedge=h, entry=e)
+            s_ = summary(r["net"])
+            sharpe[h].append(s_["sharpe"])
+            first_half = (1 + r["net"][r["year"] <= 2017]).prod() ** (1 / 8) - 1
+            second_half = (1 + r["net"][r["year"] > 2017]).prod() ** (1 / 8.9) - 1
+            res[f"{h}, enter at {e}"] = (
+                f"net {s_['annual']:+.2%}, Sharpe {s_['sharpe']:.2f}; 2010-17 "
+                f"{first_half:+.2%}, 2018-26 {second_half:+.2%} a year"
+            )
+
+    if example is not None:
+        idx, b0, kb, rb, first = example
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.axvspan(idx[first], idx[-1], color=plots.GRID, alpha=0.5, lw=0)
+        ax.plot(idx, kb, color=plots.SERIES[0], lw=1.4)
+        ax.plot(idx, rb, color=plots.SERIES[1], lw=1.2)
+        ax.axhline(b0, color=plots.TEXT_2, lw=1, ls="--")
+        plots.label_line_end(ax, idx[-1], kb[-1], "Kalman", plots.SERIES[0])
+        plots.label_line_end(ax, idx[-1], rb[-1], "rolling 120-day", plots.SERIES[1])
+        ax.text(idx[5], b0, f" fixed {b0:.2f}", va="bottom", fontsize=8, color=plots.TEXT_2)
+        ax.set_ylabel("hedge ratio (log HDFC Bank on log ICICI Bank)")
+        ax.set_title(
+            "HDFC Bank against ICICI Bank: three hedge ratios, each known before the day "
+            "(2026 shaded)",
+            fontsize=10,
+            fontweight="normal",
+            loc="left",
+        )
+        ax.margins(x=0.1)
+        fig.tight_layout()
+        plots.save(fig, out_dir, "kalman_example")
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.4), gridspec_kw={"width_ratios": [1.25, 1]})
+    names = list(variants)[::-1]
+    v = [100 * out[k]["annual"] for k in names]
+    axes[0].barh(
+        names,
+        v,
+        height=0.55,
+        color=[plots.SERIES[0] if "fixed" in k else plots.MUTED for k in names],
+    )
+    axes[0].axvline(0, color=plots.TEXT_2, lw=0.8)
+    for i, x in enumerate(v):
+        axes[0].text(
+            x + (0.06 if x >= 0 else -0.06),
+            i,
+            f"{x:+.1f}%",
+            va="center",
+            ha="left" if x >= 0 else "right",
+            fontsize=9,
+            color=plots.TEXT,
+        )
+    axes[0].set_xlim(-2.2, 3)
+    axes[0].set_xlabel("return above cash after costs, % a year")
+    for h, c, lab in (
+        ("fixed", plots.SERIES[0], "fixed ratio, 60-day z"),
+        ("kalman signal", plots.SERIES[1], "Kalman signal"),
+    ):
+        axes[1].plot(grid, sharpe[h], "o-", color=c, lw=2, ms=6)
+        plots.label_line_end(axes[1], grid[-1], sharpe[h][-1], lab, c)
+    axes[1].axhline(0, color=plots.TEXT_2, lw=0.8)
+    axes[1].set_xlabel("entry level, standard deviations")
+    axes[1].set_ylabel("Sharpe after costs")
+    axes[1].set_xlim(0.6, 2.9)
+    fig.suptitle(
+        "A moving hedge ratio alone hurt; the Kalman signal entered early did best",
+        x=0.02,
+        ha="left",
+    )
+    fig.tight_layout()
+    plots.save(fig, out_dir, "kalman_strategy")
+    return res
+
+
 REPORTS: dict[str, Callable[[Path], dict]] = {
     "cointegration": report_cointegration,
     "spread": report_spread,
     "search": report_search,
     "strategy": report_strategy,
     "breaks": report_breaks,
+    "kalman": report_kalman,
 }

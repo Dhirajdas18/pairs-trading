@@ -57,6 +57,8 @@ def pair_returns(
     max_days: int | None = None,
     stop_loss: float | None = None,
     retired: np.ndarray | None = None,
+    beta_path: np.ndarray | None = None,
+    z_input: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Daily returns above cash, before and after costs, of one pair over days `first`..end.
 
@@ -68,21 +70,34 @@ def pair_returns(
     Stops (pt/05), each closing the trade and blocking re-entry until |z| < 0.5: `stop_z` when |z|
     passes it, `max_days` after that many days held, `stop_loss` when the trade has lost that share
     of the pair's capital. `retired` (bool per day) closes the pair for good from the first True.
+    Time-varying hedge (pt/06): `beta_path` gives each day's hedge ratio known before that day;
+    a trade's legs use the ratio of the day it was decided, kept until it closes. `z_input`
+    replaces the rolling z of `spread` as the signal.
     Returns (gross, net, trades) for the test days.
     """
     n = len(spread)
-    z = rolling_z(spread, window)
+    z = rolling_z(spread, window) if z_input is None else np.array(z_input, float)
     z[:first] = np.nan  # nothing is opened from formation-day signals
     if stop_z is None and max_days is None and stop_loss is None and retired is None:
         decided = positions(z, entry, exit) if exit > 0 else _cross_zero(z, entry)
         held = np.zeros(n)
         held[lag:] = decided[:-lag] if lag else decided
     else:
-        unit = (ra - RF * dt - beta * (rb - RF * dt)) / (1 + abs(beta))
+        bu = beta if beta_path is None else np.nan_to_num(beta_path, nan=beta)
+        unit = (ra - RF * dt - bu * (rb - RF * dt)) / (1 + np.abs(bu))
         held = _with_stops(z, unit, entry, lag, stop_z, max_days, stop_loss, retired)
     held[: first + lag] = 0.0
     held[-1] = 0.0  # flat by the last close
-    wa, wb = held / (1 + abs(beta)), -held * beta / (1 + abs(beta))
+    if beta_path is None:
+        bt = np.full(n, beta)
+    else:
+        bt = np.full(n, np.nan)
+        for t in range(n):
+            if held[t] != 0:
+                new = t == 0 or held[t] != held[t - 1]
+                bt[t] = beta_path[max(t - lag, 0)] if new else bt[t - 1]
+        bt = np.nan_to_num(bt, nan=0.0)
+    wa, wb = held / (1 + np.abs(bt)), -held * bt / (1 + np.abs(bt))
     gross = np.zeros(n)
     gross[1:] = wa[:-1] * (ra[1:] - RF * dt[1:]) + wb[:-1] * (rb[1:] - RF * dt[1:])
     buy, sell = side_rates(slippage)
@@ -169,14 +184,19 @@ def run(
     picks: pd.DataFrame,
     n: int = 20,
     health: float | None = None,
+    hedge: str = "fixed",
     **kw,
 ) -> pd.DataFrame:
     """Daily portfolio returns above cash, gross and net, over every test year in `picks`.
 
     `picks`: one row per candidate pair-year with year, a, b, beta, pvalue (pt.search.scan rows,
     same industry). Each year the `n` lowest p-values are traded with 1/n of capital each; empty
-    slots sit in cash (0 above cash).
+    slots sit in cash (0 above cash). `hedge`: "fixed" (formation OLS, pt/04), "rolling" (OLS on
+    the previous 120 days), "kalman" (Kalman hedge ratio, rolling 60-day z of its spread) or
+    "kalman signal" (Kalman hedge ratio, z = prediction error over its standard deviation).
     """
+    from pt.kalman import fit_ratio, kalman_hedge, rolling_hedge
+
     out = []
     for year, g in picks.groupby("year"):
         chosen = g.nsmallest(n, "pvalue")
@@ -196,7 +216,23 @@ def run(
             ra, rb = np.r_[0.0, np.expm1(np.diff(la))], np.r_[0.0, np.expm1(np.diff(lb))]
             if health is not None:
                 kw["retired"] = health_check(la, lb, first, month_end, health)
-            g_, n_, k = pair_returns(la - r.beta * lb, ra, rb, r.beta, first, dt, month_end, **kw)
+            extra = {}
+            spread = la - r.beta * lb
+            if hedge == "rolling":
+                bp = rolling_hedge(la, lb, 120)
+                spread = la - np.nan_to_num(bp, nan=r.beta) * lb
+                extra["beta_path"] = bp
+            elif hedge.startswith("kalman"):
+                fa, fb = la[:first], lb[:first]
+                a0 = fa.mean() - r.beta * fb.mean()
+                res_var = float(np.var(fa - a0 - r.beta * fb))
+                ratio = fit_ratio(fa, fb, res_var, (a0, r.beta))
+                kf = kalman_hedge(la, lb, ratio, res_var, (a0, r.beta))
+                extra["beta_path"] = kf["beta"]
+                spread = la - kf["beta"] * lb
+                if hedge == "kalman signal":
+                    extra["z_input"] = kf["error"] / np.sqrt(kf["var"])
+            g_, n_, k = pair_returns(spread, ra, rb, r.beta, first, dt, month_end, **kw, **extra)
             gross += np.nan_to_num(g_) / n
             net += np.nan_to_num(n_) / n
             trades += k

@@ -18,7 +18,7 @@ computed in your browser; rebuilt every week from fresh data by GitHub Actions.
 - [x] Finding pairs across the F&O list: luck rate by placebo, multiple-testing corrections, ranking and filters
 - [x] A z-score rule out of sample after stock-futures costs, monthly rolls and whole lots
 - [x] When pairs break: a merger, stop rules, a monthly health check, and early-warning signs
-- [ ] Kalman hedge ratio against a fixed one, out of sample
+- [x] Kalman hedge ratio against fixed and rolling ones: hedge quality and the strategy, out of sample
 - [ ] A portfolio of pairs against NIFTY after costs
 
 ## Findings
@@ -163,12 +163,38 @@ retests each pair at every month end on its last 250 days and drops it for the y
   years (+1.6%, +0.5%, +1.0%, +1.3%) and of how far the spread drifted within them (+1.4%, +0.3%,
   +1.0%, +1.5%).
 
+### 6. A Kalman hedge hedged better, but only its own signal, entered early, beat the fixed rule
+
+<a href="docs/img/kalman_example.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/kalman_example.png"><img src="docs/img/kalman_example.gif" alt="Fixed, Kalman and rolling 120-day hedge ratios for HDFC Bank against ICICI Bank, 2024 to 2026" width="720"></picture></a>
+
+<a href="docs/img/kalman_strategy.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/kalman_strategy.png"><img src="docs/img/kalman_strategy.gif" alt="Return after costs for five hedge-ratio variants, and Sharpe against entry level for the fixed rule and the Kalman signal" width="720"></picture></a>
+
+Two hedge ratios that move, each known before the day it is used: a rolling regression on the previous
+120 days, and a Kalman filter in which intercept and hedge ratio drift as random walks (noise ratio
+chosen by likelihood on the formation years only). The **Kalman signal** is the filter's own one-day
+prediction error divided by its standard deviation, used in place of the 60-day z-score. A trade keeps
+the hedge ratio it was opened with, since whole lots can't be rebalanced daily. Same pairs, costs and
+rules as finding 4.
+
+- **The Kalman ratio hedged better.** On the 340 traded pair-years, the daily move left after hedging
+  had a median standard deviation of 1.97% with the Kalman ratio, 2.08% rolling and 2.17% fixed; the
+  Kalman ratio did better than fixed for 87% of pair-years. It barely moved within a year (median
+  standard deviation 0.022), while the rolling ratio swung (0.33; −0.6 to 1.75 for the pair above).
+- **A moving ratio alone hurt the strategy.** With the 60-day z-score, the rolling ratio lost 1.3% a
+  year after costs and the Kalman ratio 0.4%, against +1.4% fixed.
+- **The Kalman signal, entered early, did best.** Entering at 1 standard deviation it kept +2.0% a year
+  (Sharpe 0.56, 13 of 17 years up), at 0.75 +2.8% (0.62); at 2 it traded only 9 times a year and kept
+  +0.4%. The fixed rule's Sharpe stayed between 0.18 and 0.28 at every entry level.
+- **But it faded and was found by looking.** At entry 1 the Kalman signal made +3.2% a year in 2010–17
+  and +1.0% in 2018–26. The entry levels below 2 were tried after the result at 2 was seen, so the edge
+  needs years after 2026 to confirm.
+
 ## Quick start
 
 ```bash
 uv sync
 uv run python scripts/fetch_data.py         # Yahoo Finance -> data/prices.parquet
-uv run pt report cointegration              # also: spread, search, strategy, breaks
+uv run pt report cointegration              # also: spread, search, strategy, breaks, kalman
 uv run python scripts/build_site.py         # pair explorer -> site/index.html
 uv run pytest
 ```
@@ -188,6 +214,8 @@ sizes and NIFTY 500 industries.
 - `src/pt/coint.py`: formation/test windows and the correlation-against-cointegration study.
 - `src/pt/spread.py`: hedge-ratio methods, rolling z-scores, first-trade test, half-life carry-over.
 - `src/pt/search.py`: whole-universe scan, placebo luck rate, Benjamini-Hochberg, pair selection.
+- `src/pt/kalman.py`: Kalman hedge ratio (intercept and slope as random walks, noise ratio by
+  likelihood on formation data) and a rolling regression, both using only past prices.
 - `src/pt/strategy.py`: the out-of-sample strategy with next-day execution, futures carry, Zerodha
   charges, slippage, monthly rolls, whole-lot sizing, stop rules and a monthly health check.
 - `src/pt/site.py`: the pair explorer, one static Plotly page; no server, no committed price data.
