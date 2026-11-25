@@ -60,17 +60,11 @@ def follow_pair(form: pd.DataFrame, test: pd.DataFrame, a: str, b: str) -> dict:
     }
 
 
-def rolling_study(
-    logp: pd.DataFrame,
-    sectors: dict[str, str],
-    years: range,
-    form_years: int = 2,
-    min_cover: float = 0.98,
-) -> pd.DataFrame:
-    """One row per (test year, pair): formation = the `form_years` calendar years before the test
-    year, test = that calendar year. A stock enters a window only if it has a price on at least
-    `min_cover` of the window's days (its gaps are filled from the previous close)."""
-    rows = []
+def windows(logp: pd.DataFrame, years: range, form_years: int = 2, min_cover: float = 0.98):
+    """Yield (test year, formation log prices, test log prices) for each year: formation = the
+    `form_years` calendar years before the test year, test = that calendar year. A stock enters a
+    window only if it has a price on at least `min_cover` of both parts' days; its gaps are filled
+    from the previous close."""
     for year in years:
         f0, f1 = pd.Timestamp(year - form_years, 1, 1), pd.Timestamp(year - 1, 12, 31)
         t0, t1 = pd.Timestamp(year, 1, 1), pd.Timestamp(year, 12, 31)
@@ -82,8 +76,20 @@ def rolling_study(
             for s in logp.columns
             if form[s].notna().mean() >= min_cover and test[s].notna().mean() >= min_cover
         ]
-        form, test = form[ok].ffill().bfill(), test[ok].ffill().bfill()
-        for a, b in same_sector_pairs(ok, sectors):
+        yield year, form[ok].ffill().bfill(), test[ok].ffill().bfill()
+
+
+def rolling_study(
+    logp: pd.DataFrame,
+    sectors: dict[str, str],
+    years: range,
+    form_years: int = 2,
+    min_cover: float = 0.98,
+) -> pd.DataFrame:
+    """One row per (test year, same-sector pair) of `follow_pair` results over `windows`."""
+    rows = []
+    for year, form, test in windows(logp, years, form_years, min_cover):
+        for a, b in same_sector_pairs(list(form.columns), sectors):
             rows.append({"year": year, "sector": sectors[a]} | follow_pair(form, test, a, b))
     return pd.DataFrame(rows)
 

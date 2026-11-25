@@ -169,4 +169,167 @@ def report_cointegration(out_dir: Path) -> dict:
     return res
 
 
-REPORTS: dict[str, Callable[[Path], dict]] = {"cointegration": report_cointegration}
+def report_spread(out_dir: Path) -> dict:
+    """Building the spread: one pair's spread and z-scores through a year it was not fitted on,
+    which hedge ratio keeps gaps closing, which z-score stays honest, and whether half-life
+    carries over."""
+    from scipy.stats import spearmanr
+
+    from pt.data import SECTORS, SYMBOLS
+    from pt.pairs import engle_granger
+    from pt.spread import Z_WINDOWS, rolling_z, spread_study, summarise
+
+    res = {}
+    logp = np.log(prices()[SYMBOLS])
+
+    # 1. example: HDFC Bank on ICICI Bank, fitted on 2024-2025, followed through 2026
+    a, b = "HDFCBANK", "ICICIBANK"
+    pair = logp[[a, b]].loc["2024-01-01":].ffill().dropna()
+    form, test = pair.loc[:"2025-12-31"], pair.loc["2026-01-01":]
+    eg = engle_granger(form[a].to_numpy(), form[b].to_numpy())
+    s = pair[a] - eg["alpha"] - eg["beta"] * pair[b]
+    mu, sd = s.loc[form.index].mean(), s.loc[form.index].std(ddof=1)
+    z60 = pd.Series(rolling_z(s.to_numpy(), 60), index=s.index)
+    zf = (s - mu) / sd
+    res["example"] = (
+        f"{a} on {b}, fitted 2024-25: beta {eg['beta']:.2f}, p {eg['pvalue']:.3f}, half-life "
+        f"{eg['half_life']:.0f} days; 2026 days beyond 2 formation sd "
+        f"{(zf.loc[test.index].abs() > 2).mean():.0%}, beyond 2 on the 60-day z "
+        f"{(z60.loc[test.index].abs() > 2).mean():.0%}"
+    )
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True, height_ratios=[1.2, 1])
+    ax = axes[0]
+    ax.axvspan(test.index[0], test.index[-1], color=plots.GRID, alpha=0.5, lw=0)
+    ax.plot(s.index, 100 * (s - mu), color=plots.SERIES[0], lw=1.4)
+    for k in (-2, 2):
+        ax.axhline(100 * k * sd, color=plots.TEXT_2, lw=0.8, ls="--")
+    ax.axhline(0, color=plots.TEXT_2, lw=0.8)
+    ax.text(
+        test.index[5],
+        100 * 2 * sd,
+        " ±2 sd of 2024-25",
+        va="bottom",
+        fontsize=8,
+        color=plots.TEXT_2,
+    )
+    ax.set_ylabel("spread, % from 2024-25 mean")
+    ax.set_title(
+        f"{a} against {b}: hedge ratio {eg['beta']:.2f} and band fitted on 2024-25 "
+        f"(p {eg['pvalue']:.3f}); 2026 shaded",
+        fontsize=10,
+        fontweight="normal",
+        loc="left",
+    )
+    ax = axes[1]
+    ax.axvspan(test.index[0], test.index[-1], color=plots.GRID, alpha=0.5, lw=0)
+    ax.plot(zf.index, zf, color=plots.SERIES[1], lw=1.2)
+    ax.plot(z60.index, z60, color=plots.SERIES[0], lw=1.2)
+    plots.label_line_end(ax, zf.index[-1], zf.iloc[-1], "z from 2024-25", plots.SERIES[1])
+    plots.label_line_end(ax, z60.index[-1], z60.iloc[-1], "60-day z", plots.SERIES[0])
+    for k in (-2, 2):
+        ax.axhline(k, color=plots.TEXT_2, lw=0.8, ls="--")
+    ax.set_ylabel("z-score")
+    fig.tight_layout()
+    plots.save(fig, out_dir, "spread_example")
+
+    # 2-4. every same-sector pair, formation 2 years -> next year
+    st = spread_study(logp, SECTORS, range(2010, 2027))
+    coint, none = st["pvalue"] < 0.05, st["pvalue"] > 0.5
+    groups = {"cointegrated": coint, "no leash": none, "all": st["pvalue"] >= 0}
+    hedges = ["OLS A on B", "OLS B on A", "TLS", "ratio"]
+    zs = ["z formation"] + [f"z rolling {w}" for w in Z_WINDOWS]
+    summ = summarise(st, hedges + zs, groups)
+    res["pair-years"] = f"{len(st)}, cointegrated (p < 0.05) {int(coint.sum())}"
+    for h in hedges:
+        c = summ[("cointegrated", h)]
+        res[f"hedge {h}"] = (
+            f"cointegrated: closed once opened {c['closed once opened']:.0%}, next-year spread "
+            f"{c['sd ratio']:.2f}x formation sd; all pairs closed "
+            f"{summ[('all', h)]['closed once opened']:.0%}"
+        )
+    for zname in zs:
+        c, n = summ[("cointegrated", zname)], summ[("no leash", zname)]
+        res[zname] = (
+            f"days beyond 2: {c['days beyond 2']:.1%}; first trade cointegrated "
+            f"{100 * c['first-trade gain']:+.2f}% (won {c['first trade won']:.0%}), no leash "
+            f"{100 * n['first-trade gain']:+.2f}% (won {n['first trade won']:.0%})"
+        )
+    ok = np.isfinite(st["hl_form"]) & np.isfinite(st["hl_test"]) & coint
+    rho = spearmanr(st.loc[ok, "hl_form"], st.loc[ok, "hl_test"]).statistic
+    res["half-life, cointegrated"] = (
+        f"formation median {st.loc[ok, 'hl_form'].median():.0f} days, next year "
+        f"{st.loc[ok, 'hl_test'].median():.0f}; rank corr {rho:.2f}; no reversion next year "
+        f"{(~np.isfinite(st.loc[coint, 'hl_test'])).mean():.0%}"
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
+    labels = {
+        "OLS A on B": "least squares A on B",
+        "OLS B on A": "least squares B on A",
+        "TLS": "total least squares",
+        "ratio": "price ratio (β = 1)",
+    }
+    vals = [100 * summ[("cointegrated", h)]["closed once opened"] for h in hedges][::-1]
+    names = [labels[h] for h in hedges][::-1]
+    axes[0].barh(
+        names,
+        vals,
+        color=[plots.MUTED if "ratio" in n else plots.SERIES[0] for n in names],
+        height=0.55,
+    )
+    for i, v in enumerate(vals):
+        axes[0].text(v + 1, i, f"{v:.0f}%", va="center", fontsize=9, color=plots.TEXT)
+    axes[0].set_xlim(0, 65)
+    axes[0].set_xlabel("gaps that closed after opening to 2 sd, %")
+    axes[0].set_title(
+        "Hedge ratio (cointegrated pairs)", fontsize=10, fontweight="normal", loc="left"
+    )
+    xs = np.arange(len(zs))
+    w = 0.38
+    zl = ["2-year\nformation"] + [f"rolling\n{k} days" for k in Z_WINDOWS]
+    cg = [100 * summ[("cointegrated", z)]["first-trade gain"] for z in zs]
+    ng = [100 * summ[("no leash", z)]["first-trade gain"] for z in zs]
+    axes[1].bar(xs - w / 2, cg, w, color=plots.SERIES[0], label="cointegrated (p < 0.05)")
+    axes[1].bar(xs + w / 2, ng, w, color=plots.MUTED, label="no leash (p > 0.5)")
+    axes[1].axhline(0, color=plots.TEXT_2, lw=0.8)
+    axes[1].set_xticks(xs, zl)
+    axes[1].set_ylabel("average first trade, % before costs")
+    axes[1].set_title(
+        "Z-score for entry at 2 and exit at 0", fontsize=10, fontweight="normal", loc="left"
+    )
+    axes[1].legend(fontsize=8, loc="lower right")
+    fig.suptitle(
+        "Next year: the hedge ratio matters little; a rolling z-score turns losses into gains",
+        x=0.02,
+        ha="left",
+    )
+    fig.tight_layout()
+    plots.save(fig, out_dir, "spread_choices")
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    d = st[ok]
+    ax.scatter(d["hl_form"], d["hl_test"], s=6, color=plots.SERIES[0], alpha=0.35, linewidths=0)
+    ax.plot([1, 400], [1, 400], color=plots.TEXT_2, lw=0.8, ls="--")
+    ax.text(250, 250, "same", fontsize=8, color=plots.TEXT_2, ha="right", va="bottom")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(1, 400)
+    ax.set_ylim(1, 400)
+    ax.set_xlabel("half-life in the 2 formation years, days")
+    ax.set_ylabel("half-life next year, days")
+    ax.set_title(
+        f"{ok.sum():,} cointegrated pair-years: median {d['hl_form'].median():.0f} days fitted, "
+        f"{d['hl_test'].median():.0f} next year; rank corr {rho:.2f}",
+        fontsize=10,
+        fontweight="normal",
+        loc="left",
+    )
+    fig.tight_layout()
+    plots.save(fig, out_dir, "half_life")
+    return res
+
+
+REPORTS: dict[str, Callable[[Path], dict]] = {
+    "cointegration": report_cointegration,
+    "spread": report_spread,
+}
