@@ -185,6 +185,7 @@ def run(
     n: int = 20,
     health: float | None = None,
     hedge: str = "fixed",
+    sizing: str = "equal",
     **kw,
 ) -> pd.DataFrame:
     """Daily portfolio returns above cash, gross and net, over every test year in `picks`.
@@ -194,6 +195,8 @@ def run(
     slots sit in cash (0 above cash). `hedge`: "fixed" (formation OLS, pt/04), "rolling" (OLS on
     the previous 120 days), "kalman" (Kalman hedge ratio, rolling 60-day z of its spread) or
     "kalman signal" (Kalman hedge ratio, z = prediction error over its standard deviation).
+    `sizing`: "equal" (1/n each) or "inverse vol" (capital in proportion to 1 / the standard
+    deviation of the pair's daily hedged return over its formation years, same total).
     """
     from pt.kalman import fit_ratio, kalman_hedge, rolling_hedge
 
@@ -211,7 +214,16 @@ def run(
         gross = np.zeros(len(test_idx))
         net = np.zeros(len(test_idx))
         trades = 0
-        for r in chosen.itertuples():
+        weights = np.full(len(chosen), 1.0 / n)
+        if sizing == "inverse vol":
+            sd = []
+            for r in chosen.itertuples():
+                fa, fb = px[r.a].ffill().to_numpy()[:first], px[r.b].ffill().to_numpy()[:first]
+                u = (np.expm1(np.diff(fa)) - r.beta * np.expm1(np.diff(fb))) / (1 + abs(r.beta))
+                sd.append(np.nanstd(u))  # a stock listed during formation starts with gaps
+            inv = 1 / np.array(sd)
+            weights = inv / inv.sum() * len(chosen) / n
+        for w_pair, r in zip(weights, chosen.itertuples(), strict=True):
             la, lb = px[r.a].ffill().to_numpy(), px[r.b].ffill().to_numpy()
             ra, rb = np.r_[0.0, np.expm1(np.diff(la))], np.r_[0.0, np.expm1(np.diff(lb))]
             if health is not None:
@@ -233,8 +245,8 @@ def run(
                 if hedge == "kalman signal":
                     extra["z_input"] = kf["error"] / np.sqrt(kf["var"])
             g_, n_, k = pair_returns(spread, ra, rb, r.beta, first, dt, month_end, **kw, **extra)
-            gross += np.nan_to_num(g_) / n
-            net += np.nan_to_num(n_) / n
+            gross += np.nan_to_num(g_) * w_pair
+            net += np.nan_to_num(n_) * w_pair
             trades += k
         out.append(
             pd.DataFrame({"gross": gross, "net": net, "year": year}, index=test_idx).assign(
@@ -264,6 +276,16 @@ def lots_needed(
             }
     na, nb, err = best
     return {"lots_a": na, "lots_b": nb, "error": err, "notional": na * value_a + nb * value_b}
+
+
+def vol_target(r: pd.Series, target: float = 0.10, lookback: int = 60, cap: float = 3.0):
+    """Scale daily returns above cash to a target annual volatility: each day's scale is
+    target / the realised volatility of the previous `lookback` days (today excluded), capped at
+    `cap` and 1 until there is enough history. Costs scale with it (the trades get bigger); the cost
+    of changing the scale itself is left out."""
+    vol = r.rolling(lookback).std().shift(1) * np.sqrt(250)
+    lev = (target / vol).clip(upper=cap).fillna(1.0)
+    return r * lev, lev
 
 
 def summary(r: pd.Series) -> dict:

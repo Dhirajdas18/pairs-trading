@@ -19,7 +19,7 @@ computed in your browser; rebuilt every week from fresh data by GitHub Actions.
 - [x] A z-score rule out of sample after stock-futures costs, monthly rolls and whole lots
 - [x] When pairs break: a merger, stop rules, a monthly health check, and early-warning signs
 - [x] Kalman hedge ratio against fixed and rolling ones: hedge quality and the strategy, out of sample
-- [ ] A portfolio of pairs against NIFTY after costs
+- [x] A portfolio of pairs against NIFTY after costs: total return, market exposure, sizing by risk, volatility targeting, a NIFTY mix
 
 ## Findings
 
@@ -189,12 +189,40 @@ rules as finding 4.
   and +1.0% in 2018–26. The entry levels below 2 were tried after the result at 2 was seen, so the edge
   needs years after 2026 to confirm.
 
+### 7. Pairs fell far less than NIFTY but earned less per unit of risk; a 30% sleeve helped a little
+
+<a href="docs/img/portfolio_growth.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/portfolio_growth.png"><img src="docs/img/portfolio_growth.gif" alt="Growth of 100 with total return for the NIFTY ETF, a 70/30 NIFTY and pairs mix, the pairs book and cash, 2010-2026" width="720"></picture></a>
+
+<a href="docs/img/portfolio_risk.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/portfolio_risk.png"><img src="docs/img/portfolio_risk.gif" alt="Sharpe and worst drawdown for NIFTY, four pairs books and a 70/30 mix" width="720"></picture></a>
+
+Total return adds back the cash the pairs book's capital earns (6.5% a year) to its return above cash
+from finding 4; NIFTY is the NIFTY ETF with dividends. Sizing by risk gives each pair capital in
+proportion to 1 / the volatility of its hedged daily return over its formation years. The 10%
+volatility target scales the whole book each day by 10% / its volatility over the previous 60 days,
+capped at 3×. The 70/30 mix holds the ETF and the pairs book, rebalanced daily.
+
+- **NIFTY earned more.** 2010–2026: NIFTY ETF +10.8% a year, the pairs book +8.2%, cash 6.5%. Above
+  cash, NIFTY's Sharpe was 0.32 and the pairs book's 0.26.
+- **But pairs barely moved with the market.** Correlation with NIFTY 0.14, beta 0.055; worst drawdown
+  −14.7% against NIFTY's −36.3%. In March 2020 NIFTY lost 23.4% above cash and the pairs book 3.7%; in
+  March 2026 NIFTY −11.7%, pairs +0.4%.
+- **Sizing by risk helped a little.** +1.5% above cash (Sharpe 0.31, drawdown −12.0%) against +1.4% with
+  equal capital.
+- **A volatility target added return, not quality.** Scaling to 10% needed a median 2.3× and took the
+  pairs book to +2.0% above cash with a Sharpe of 0.24 and a −19.5% drawdown.
+- **A 30% pairs sleeve improved NIFTY slightly.** 70% NIFTY + 30% pairs: +10.3% a year, Sharpe 0.35
+  against 0.32, worst drawdown −28.4% against −36.3%.
+- **Only the hindsight rule beat NIFTY.** The Kalman signal of finding 6 at a 10% target made +11.7% a
+  year (Sharpe 0.60, drawdown −23.4%), but it sat at the 3× cap 73% of the time and its settings were
+  found by searching the same years.
+
 ## Quick start
 
 ```bash
 uv sync
 uv run python scripts/fetch_data.py         # Yahoo Finance -> data/prices.parquet
-uv run pt report cointegration              # also: spread, search, strategy, breaks, kalman
+uv run pt report cointegration              # also: spread, search, strategy, breaks,
+                                            # kalman, portfolio
 uv run python scripts/build_site.py         # pair explorer -> site/index.html
 uv run pytest
 ```
@@ -217,7 +245,8 @@ sizes and NIFTY 500 industries.
 - `src/pt/kalman.py`: Kalman hedge ratio (intercept and slope as random walks, noise ratio by
   likelihood on formation data) and a rolling regression, both using only past prices.
 - `src/pt/strategy.py`: the out-of-sample strategy with next-day execution, futures carry, Zerodha
-  charges, slippage, monthly rolls, whole-lot sizing, stop rules and a monthly health check.
+  charges, slippage, monthly rolls, whole-lot sizing, stop rules, a monthly health check, sizing by risk and a
+  volatility target.
 - `src/pt/site.py`: the pair explorer, one static Plotly page; no server, no committed price data.
 - `src/pt/reports.py`: README findings, reproducible with `pt report <topic>` (every number quoted
   above is printed by its report).

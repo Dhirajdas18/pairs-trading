@@ -903,6 +903,146 @@ def report_kalman(out_dir: Path) -> dict:
     return res
 
 
+def report_portfolio(out_dir: Path) -> dict:
+    """The pairs book as a whole against NIFTY, 2010-2026: total return with cash, market exposure,
+    crash months, sizing by risk, volatility targeting, and NIFTY plus a pairs sleeve."""
+    from pt.data import SECTORS, SYMBOLS
+    from pt.search import scan
+    from pt.strategy import RF, run, summary, vol_target
+
+    res = {}
+    px = prices()
+    logp = np.log(px[SYMBOLS])
+    sc = scan(logp, SECTORS, range(2010, 2027))
+    picks = sc[sc["same_sector"]]
+    books = {
+        "pairs, equal (finding 4)": run(logp, picks)["net"],
+        "pairs, sized by risk": run(logp, picks, sizing="inverse vol")["net"],
+        "Kalman signal at 1 (finding 6)": run(logp, picks, hedge="kalman signal", entry=1.0)["net"],
+    }
+    idx = books["pairs, equal (finding 4)"].index
+    nifty = px["NIFTYBEES"].pct_change().reindex(idx).fillna(0.0)
+    dt = np.r_[0.0, np.diff(idx.values).astype("timedelta64[D]").astype(float) / 365.0]
+    cash = pd.Series(RF * dt, index=idx)
+    ex = {"NIFTY ETF": nifty - cash} | books
+    lev = {}
+    for k in list(books):
+        ex[k + ", 10% vol target"], lev[k] = vol_target(books[k])
+    ex["70% NIFTY + 30% pairs"] = 0.7 * ex["NIFTY ETF"] + 0.3 * books["pairs, equal (finding 4)"]
+
+    yrs = (idx[-1] - idx[0]).days / 365.25
+    stats = {}
+    for k, e in ex.items():
+        tot = (1 + e + cash).cumprod()
+        s_ = summary(e)
+        stats[k] = s_ | {
+            "total": float(tot.iloc[-1] ** (1 / yrs) - 1),
+            "dd": float((tot / tot.cummax() - 1).min()),
+            "corr": float(e.corr(ex["NIFTY ETF"])),
+            "beta": float(np.cov(e, ex["NIFTY ETF"])[0, 1] / ex["NIFTY ETF"].var()),
+        }
+        res[k] = (
+            f"total {stats[k]['total']:+.2%} a year (cash {RF:.1%}), "
+            f"above cash {s_['annual']:+.2%}, "
+            f"vol {s_['vol']:.1%}, Sharpe {s_['sharpe']:.2f}, worst drawdown {stats[k]['dd']:.1%}, "
+            f"corr with NIFTY {stats[k]['corr']:+.2f}, beta {stats[k]['beta']:+.3f}"
+        )
+    for k, v in lev.items():
+        res[f"{k}: leverage for 10% vol"] = (
+            f"median {v.median():.1f}x, at the 3x cap {(v >= 3).mean():.0%}"
+        )
+    m = pd.DataFrame(
+        {
+            k: ex[k]
+            for k in ("NIFTY ETF", "pairs, equal (finding 4)", "Kalman signal at 1 (finding 6)")
+        }
+    )
+    monthly = (1 + m).resample("ME").prod() - 1
+    worst = monthly.nsmallest(5, "NIFTY ETF")
+    for d, row in worst.iterrows():
+        res[f"NIFTY's bad month {d:%b %Y}"] = (
+            f"NIFTY {100 * row.iloc[0]:+.1f}%, pairs {100 * row.iloc[1]:+.1f}%, Kalman signal "
+            f"{100 * row.iloc[2]:+.1f}% (above cash)"
+        )
+
+    fig, ax = plt.subplots(figsize=(10, 4.6))
+    lines = {
+        "NIFTY ETF": plots.SERIES[1],
+        "70% NIFTY + 30% pairs": plots.SERIES[2],
+        "pairs, equal (finding 4)": plots.SERIES[0],
+    }
+    for k, c in lines.items():
+        tot = 100 * (1 + ex[k] + cash).cumprod()
+        ax.plot(tot.index, tot, color=c, lw=1.6)
+        plots.label_line_end(ax, tot.index[-1], tot.iloc[-1], f"{k} {stats[k]['total']:+.1%}", c)
+    c_ = 100 * (1 + cash).cumprod()
+    ax.plot(c_.index, c_, color=plots.MUTED, lw=1.2, ls="--")
+    plots.label_line_end(ax, c_.index[-1], c_.iloc[-1], f"cash {RF:.1%}", plots.MUTED)
+    ax.set_yscale("log")
+    ax.set_yticks([100, 150, 200, 300, 400, 600], ["100", "150", "200", "300", "400", "600"])
+    ax.minorticks_off()
+    ax.set_ylabel("growth of 100, log scale")
+    ax.set_title(
+        "Total return a year, 2010-2026, after costs (cash earns 6.5%)",
+        fontsize=10,
+        fontweight="normal",
+        loc="left",
+    )
+    ax.margins(x=0.2)
+    fig.tight_layout()
+    plots.save(fig, out_dir, "portfolio_growth")
+
+    names = [
+        "NIFTY ETF",
+        "pairs, equal (finding 4)",
+        "pairs, sized by risk",
+        "pairs, equal (finding 4), 10% vol target",
+        "70% NIFTY + 30% pairs",
+        "Kalman signal at 1 (finding 6)",
+        "Kalman signal at 1 (finding 6), 10% vol target",
+    ][::-1]
+    short = {
+        "pairs, equal (finding 4), 10% vol target": "pairs, equal, 10% vol target",
+        "Kalman signal at 1 (finding 6), 10% vol target": "Kalman signal, 10% vol target",
+    }
+    labels = [short.get(k, k) for k in names]
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.6), sharey=True)
+    col = [
+        plots.SERIES[1]
+        if k == "NIFTY ETF"
+        else plots.MUTED
+        if k.startswith("Kalman")
+        else plots.SERIES[0]
+        for k in names
+    ]
+    for ax, key, lab in (
+        (axes[0], "sharpe", "Sharpe (return above cash ÷ volatility)"),
+        (axes[1], "dd", "worst drawdown of total return, %"),
+    ):
+        v = [stats[k][key] * (100 if key == "dd" else 1) for k in names]
+        ax.barh(labels, v, color=col, height=0.55)
+        ax.axvline(0, color=plots.TEXT_2, lw=0.8)
+        for i, x in enumerate(v):
+            if key == "dd":
+                ax.text(
+                    x - 0.5, i, f"{x:.0f}%", va="center", ha="right", fontsize=9, color=plots.TEXT
+                )
+            else:
+                ax.text(x + 0.01, i, f"{x:.2f}", va="center", fontsize=9, color=plots.TEXT)
+        ax.set_xlabel(lab)
+    axes[0].set_xlim(0, 0.75)
+    axes[1].set_xlim(-45, 0)
+    fig.suptitle(
+        "Pairs fell far less than NIFTY but earned less per unit of risk; grey: found "
+        "with hindsight",
+        x=0.02,
+        ha="left",
+    )
+    fig.tight_layout()
+    plots.save(fig, out_dir, "portfolio_risk")
+    return res
+
+
 REPORTS: dict[str, Callable[[Path], dict]] = {
     "cointegration": report_cointegration,
     "spread": report_spread,
@@ -910,4 +1050,5 @@ REPORTS: dict[str, Callable[[Path], dict]] = {
     "strategy": report_strategy,
     "breaks": report_breaks,
     "kalman": report_kalman,
+    "portfolio": report_portfolio,
 }
