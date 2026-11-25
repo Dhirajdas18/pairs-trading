@@ -77,7 +77,9 @@ SECTIONS = [
         "many trading days a gap takes to close by half. The backtest shorts the spread when its "
         "z-score rises above the entry level, buys it below minus the entry level and closes "
         "inside the exit band. The hedge ratio is fitted on the same window it trades, so the "
-        "result is in-sample.",
+        "result is in-sample; it also trades at the signalling close and charges only the cost "
+        "per side, with no next-day execution, monthly rolls or futures carry, so it looks better "
+        "than the out-of-sample strategy in the findings.",
         explorer_section,
     ),
 ]

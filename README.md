@@ -5,7 +5,9 @@
 
 Pairs trading on NSE F&O stocks (about 217, daily data from 2007): which pairs hold together, how to
 measure their gap, and what is left after futures costs. Every leg is an F&O stock, because in India a
-short held overnight needs a stock future. Every result is scored out of sample.
+short held overnight needs a stock future. Every fitted number (hedge ratios, p-values, means,
+standard deviations) comes from years before the one it is scored on; rule choices made after
+seeing results are flagged where they appear.
 
 **Live pair explorer: [dhirajdas18.github.io/pairs-trading](https://dhirajdas18.github.io/pairs-trading/)**,
 pick two stocks and see the hedge ratio, cointegration test, half-life, spread, z-score and a backtest,
@@ -67,7 +69,7 @@ before costs.
 - **The fitted band is too narrow.** Next year, cointegrated spreads sat a typical 2.3 formation standard
   deviations from their formation mean, so a fixed z-score was beyond ±2 on 45% of days, where a stable
   spread gives about 5%. HDFC Bank against ICICI Bank (top) passed on 2024–25 (p 0.001, half-life 13
-  days), then slid about 30% in 2026; with no stop, its first trade lost about 17% (fixed z) and 13%
+  days), then fell as far as 33% below its 2024–25 mean in 2026; with no stop, its first trade lost about 17% (fixed z) and 13%
   (rolling 60-day z).
 - **A rolling z-score turns losses into small gains.** On cointegrated pairs the fixed band averaged
   −0.95% a first trade; rolling 20, 60 and 120-day z-scores averaged +0.57%, +1.09% and +0.66%, winning
@@ -95,8 +97,9 @@ B's volatility and calm and stormy spells but breaks any link with A.
 - **Half the passes are luck.** With the link broken, 5.7% of pairs still had p < 0.05 (the test runs a
   little loose against 5%). Real same-industry pairs passed 10.7% of the time, so about half their
   passes are luck; across industries 9.1% passed, about 63% luck.
-- **Formal corrections backfired.** Benjamini-Hochberg at 5% kept 15 pairs a year, 96 of its 120 in
-  2010–11, and their first trades averaged −0.35%; Bonferroni kept 3 a year and averaged −4.9%. The very
+- **Formal corrections backfired.** Benjamini-Hochberg at 5% kept 120 pair-years in 17 years (none in 9
+  of them, 96 in 2010–11), and their first trades averaged −0.35%; Bonferroni kept 24 and averaged
+  −4.9%. The very
   lowest p-values bunched in years when whole sectors moved together.
 - **A short list worked best.** The 20 lowest p-values in each year, within industries, closed 57% of
   opened gaps and averaged +2.0% a first trade (positive in 12 of 17 years; worst 2011, −3.9%). Shorter
@@ -113,7 +116,9 @@ B's volatility and calm and stormy spells but breaks any link with A.
 
 <a href="docs/img/strategy_variants.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/strategy_variants.png"><img src="docs/img/strategy_variants.gif" alt="Net return above cash for the base rule and eleven one-setting variants" width="560"></picture></a>
 
-The rule comes from findings 2 and 3, fixed before this test: each year, the 20 same-industry pairs with
+The rule comes from findings 2 and 3, which compared their choices on these same years, so the rule's
+design is not out of sample; what is, is that every pair, hedge ratio and z-score is fitted only on data
+before the year it trades. Each year, the 20 same-industry pairs with
 the lowest p-values on the two years before; enter when the 60-day z-score passes ±2, exit when it
 crosses 0, close everything at year end; each pair gets an equal share of capital. Signals at one close
 are traded at the next. Each leg is a stock future: the stock's dividend-inclusive return minus cash
@@ -128,14 +133,15 @@ legs at each month end.
   back 1.1, dropping the monthly rolls 1.0; STT and fees on entries and exits alone came to 0.3.
 - **Slippage decides it.** At 2 bp a side the rule kept +2.0%; at 10 bp +0.3%; at 20 bp it lost 1.7%
   a year. Trading at the signalling close instead of the next would add 0.5.
-- **Settings moved it within a narrow band.** 10 pairs +2.5%, 50 pairs +0.5%; exiting at |z| < 0.5
+- **Settings moved it a lot.** 10 pairs +2.5%, 50 pairs +0.5%; exiting at |z| < 0.5
   +2.3%; entering at 1.5 or 2.5 +1.3% and +0.5%; 20 or 120-day z-scores +1.3% and +1.4%. These were
-  all seen on the same years, so picking the best now would be hindsight.
+  all seen on the same years (Sharpe 0.12 to 0.46 against the base's 0.26), so picking the best now
+  would be hindsight.
 - **Whole lots need real capital.** For the 20 pairs picked for 2026 at today's prices and lot sizes,
   one lot of each stock misses the hedge ratio by a median 54%; getting within 10% needs a median
   ₹34 lakh of futures per pair, ₹7 crore for all 20.
 
-### 5. Stops cut the worst falls but cost more than they saved; breaks gave no warning
+### 5. Stops cut the worst falls but cost more than they saved; only long half-lives warned
 
 <a href="docs/img/breaks_merger.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/breaks_merger.png"><img src="docs/img/breaks_merger.gif" alt="HDFC Ltd's price against 42/25 of HDFC Bank's, 2020 to July 2023, pinned after the merger announcement" width="720"></picture></a>
 
@@ -156,12 +162,11 @@ retests each pair at every month end on its last 250 days and drops it for the y
   z-score stop at 3 gave −10.7% and +0.8%, a 5% loss stop −8.8% and +0.5%, a 20-day time stop −13.1%
   and +0.2%. The best Sharpe, a 60-day time stop and the p > 0.5 health check (0.28 each), barely beat
   no stop (0.26).
-- **Why stops hurt here:** a stop closes a trade when the gap is widest, which in a reverting pair is
-  just before it closes; it saves the trades that never come back and gives up those that do.
-- **No warning in the formation years.** Among cointegrated same-industry pairs, next-year first trades
-  were about the same across quartiles of how much the hedge ratio changed between the two formation
-  years (+1.6%, +0.5%, +1.0%, +1.3%) and of how far the spread drifted within them (+1.4%, +0.3%,
-  +1.0%, +1.5%).
+- **Little warning in the formation years.** Among cointegrated same-industry pairs, next-year first
+  trades were about the same across quartiles of how much the hedge ratio changed between the two
+  formation years (+1.6%, +0.5%, +1.0%, +1.3%) and of how far the spread drifted within them (+1.4%,
+  +0.3%, +1.0%, +1.5%). Only the longest formation half-lives warned: by half-life quartile +1.4%,
+  +2.6%, +0.9% and −0.4%.
 
 ### 6. A Kalman hedge hedged better, but only its own signal, entered early, beat the fixed rule
 
@@ -204,7 +209,7 @@ capped at 3×. The 70/30 mix holds the ETF and the pairs book, rebalanced daily.
 - **NIFTY earned more.** 2010–2026: NIFTY ETF +10.8% a year, the pairs book +8.2%, cash 6.5%. Above
   cash, NIFTY's Sharpe was 0.32 and the pairs book's 0.26.
 - **But pairs barely moved with the market.** Correlation with NIFTY 0.14, beta 0.055; worst drawdown
-  −14.7% against NIFTY's −36.3%. In March 2020 NIFTY lost 23.4% above cash and the pairs book 3.7%; in
+  of total return, cash included, −14.7% against NIFTY's −36.3%. In March 2020 NIFTY lost 23.4% above cash and the pairs book 3.7%; in
   March 2026 NIFTY −11.7%, pairs +0.4%.
 - **Sizing by risk helped a little.** +1.5% above cash (Sharpe 0.31, drawdown −12.0%) against +1.4% with
   equal capital.

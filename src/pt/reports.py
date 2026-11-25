@@ -127,6 +127,9 @@ def report_cointegration(out_dir: Path) -> dict:
 
     # 3. which filter picks gaps that close next year?
     g = group_outcomes(study)
+    for lo, hi in ((2010, 2015), (2016, 2020), (2021, 2026)):
+        e = group_outcomes(study[study["year"].between(lo, hi)])["converged once opened"]
+        res[f"closed once opened, {lo}-{hi}"] = ", ".join(f"{k} {v:.0%}" for k, v in e.items())
     for name, row in g.iterrows():
         res[f"next year: {name}"] = (
             f"{int(row['pairs'])} pairs, opened 2 sd {row['opened 2 sd']:.0%}, "
@@ -240,6 +243,18 @@ def report_spread(out_dir: Path) -> dict:
     zs = ["z formation"] + [f"z rolling {w}" for w in Z_WINDOWS]
     summ = summarise(st, hedges + zs, groups)
     res["pair-years"] = f"{len(st)}, cointegrated (p < 0.05) {int(coint.sum())}"
+    ex = st[(st["year"] == 2026) & (st["a"] == a) & (st["b"] == b)]
+    if len(ex):
+        res["example first trade"] = (
+            f"formation z {100 * ex['z formation|gain'].iloc[0]:+.1f}, rolling 60-day z "
+            f"{100 * ex['z rolling 60|gain'].iloc[0]:+.1f} log points; 2026 spread low "
+            f"{100 * (s.loc[test.index].min() - mu):+.0f}% from the 2024-25 mean"
+        )
+    by_year = st[coint].groupby("year")["z rolling 60|gain"].mean()
+    res["rolling 60-day z, cointegrated, by year"] = (
+        f"positive in {(by_year > 0).sum()} of {len(by_year)}; "
+        + ", ".join(f"{y} {100 * v:+.1f}%" for y, v in by_year.items() if v < 0)
+    )
     for h in hedges:
         c = summ[("cointegrated", h)]
         res[f"hedge {h}"] = (
@@ -249,6 +264,9 @@ def report_spread(out_dir: Path) -> dict:
         )
     for zname in zs:
         c, n = summ[("cointegrated", zname)], summ[("no leash", zname)]
+        res[f"{zname}: closed once opened"] = (
+            f"cointegrated {c['closed once opened']:.1%}, no leash {n['closed once opened']:.1%}"
+        )
         res[zname] = (
             f"days beyond 2: {c['days beyond 2']:.1%}; first trade cointegrated "
             f"{100 * c['first-trade gain']:+.2f}% (won {c['first trade won']:.0%}), no leash "
@@ -377,7 +395,8 @@ def report_search(out_dir: Path) -> dict:
         "20 lowest p, any two stocks": top(sc, 20),
         "20 lowest p, across industries": top(cross, 20),
     }
-    table = {k: outcomes(v) for k, v in picks.items()}
+    n_years = sc["year"].nunique()
+    table = {k: outcomes(v, n_years) for k, v in picks.items()}
     for k, o in table.items():
         res[k] = (
             f"{o['per year']:.0f} a year, closed once opened {o['closed once opened']:.0%}, first "
@@ -832,8 +851,11 @@ def report_kalman(out_dir: Path) -> dict:
             r = run(logp, picks, hedge=h, entry=e)
             s_ = summary(r["net"])
             sharpe[h].append(s_["sharpe"])
-            first_half = (1 + r["net"][r["year"] <= 2017]).prod() ** (1 / 8) - 1
-            second_half = (1 + r["net"][r["year"] > 2017]).prod() ** (1 / 8.9) - 1
+            early, late = r["net"][r["year"] <= 2017], r["net"][r["year"] > 2017]
+            first_half = (1 + early).prod() ** (
+                365.25 / (early.index[-1] - early.index[0]).days
+            ) - 1
+            second_half = (1 + late).prod() ** (365.25 / (late.index[-1] - late.index[0]).days) - 1
             res[f"{h}, enter at {e}"] = (
                 f"net {s_['annual']:+.2%}, Sharpe {s_['sharpe']:.2f}; 2010-17 "
                 f"{first_half:+.2%}, 2018-26 {second_half:+.2%} a year"

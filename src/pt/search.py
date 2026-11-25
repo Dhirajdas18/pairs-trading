@@ -64,13 +64,14 @@ def bh_reject(p: np.ndarray, q: float = 0.05) -> np.ndarray:
     return keep
 
 
-def outcomes(d: pd.DataFrame) -> dict:
-    """Next-year outcomes of a set of chosen pair-years."""
+def outcomes(d: pd.DataFrame, years: int | None = None) -> dict:
+    """Next-year outcomes of a set of chosen pair-years; "per year" divides by `years` (default:
+    the years that have any)."""
     opened = d["max_z"] > 2
     g = d["gain60"].dropna()
     return {
         "pair-years": len(d),
-        "per year": len(d) / max(d["year"].nunique(), 1),
+        "per year": len(d) / (years or max(d["year"].nunique(), 1)),
         "closed once opened": float(d.loc[opened, "converged"].mean()) if opened.any() else np.nan,
         "first trade (60-day z)": float(g.mean()) if len(g) else np.nan,
         "won": float((g > 0).mean()) if len(g) else np.nan,

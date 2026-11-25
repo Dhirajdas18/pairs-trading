@@ -64,7 +64,7 @@ const PE = $data;
       el(id).textContent = known.has(s) ? `${s}: ${PE.sectors[s]}, lot ${PE.lots[s]}.` : "";
     }
     if (!known.has(a) || !known.has(b) || a === b) {
-      el("pe-note").textContent = a === b ? "Pick two different stocks." : `Pick both stocks from the list (${known.has(a) ? b : a || "blank"} is not an F&O stock here).`;
+      el("pe-note").textContent = a === b ? "Pick two different stocks." : `Pick both stocks from the list (${(known.has(a) ? b : a) || "blank"} is not an F&O stock here).`;
       return;
     }
     history.replaceState(null, "", `#a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`);
@@ -94,7 +94,7 @@ const PE = $data;
       ["Correlation of daily returns", f2(corr(ra, rb))],
       ["Trades opened", String(net.trades)],
       ["Return after costs, a year", pct(perYear)],
-      ["Costs, total", pct(gross.equity[gross.equity.length - 1] - net.equity[net.equity.length - 1])],
+      ["Costs, in final value", pct(gross.equity[gross.equity.length - 1] - net.equity[net.equity.length - 1])],
     ];
     el("pe-stats").innerHTML = stats.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
     const pxA = Math.exp(la[la.length - 1]), pxB = Math.exp(lb[lb.length - 1]);

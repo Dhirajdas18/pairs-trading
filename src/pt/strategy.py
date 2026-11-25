@@ -1,4 +1,6 @@
-"""A pairs strategy run out of sample with stock-futures costs.
+"""A pairs strategy with stock-futures costs: every pair, hedge ratio and z-score is fitted only on
+data before the year it trades (the rule itself was chosen in pt.spread and pt.search on the same
+years).
 
 Each test year: take the `n` lowest Engle-Granger p-values among same-industry pairs fitted on the
 two years before (pt/03), trade each on a rolling z-score of its spread (pt/02), give every pair an
