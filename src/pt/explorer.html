@@ -1,0 +1,137 @@
+<form class="calc" id="pe" onsubmit="return false">
+  <label>First stock (A) <input id="pe-a" name="stock-a" list="pe-list-a" autocomplete="off" spellcheck="false" autocapitalize="characters" aria-describedby="pe-a-sector"></label>
+  <label>Second stock (B) <input id="pe-b" name="stock-b" list="pe-list-b" autocomplete="off" spellcheck="false" autocapitalize="characters" aria-describedby="pe-b-sector"></label>
+  <label>Window <select id="pe-win" name="window">
+    <option value="250">last year</option><option value="500">last 2 years</option><option value="750">last 3 years</option><option value="1250" selected>last 5 years</option>
+  </select></label>
+  <label>Z-score lookback, days <input id="pe-look" name="lookback" type="number" min="20" max="250" step="5" value="60" inputmode="numeric" autocomplete="off"></label>
+  <label>Entry at |z| above <input id="pe-entry" name="entry" type="number" min="0.5" max="4" step="0.1" value="2" inputmode="decimal" autocomplete="off"></label>
+  <label>Exit at |z| below <input id="pe-exit" name="exit" type="number" min="0" max="3" step="0.1" value="0.5" inputmode="decimal" autocomplete="off"></label>
+  <label>Cost per side, bp <input id="pe-cost" name="cost" type="number" min="0" max="50" step="0.5" value="5" inputmode="decimal" autocomplete="off"></label>
+  <datalist id="pe-list-a"></datalist><datalist id="pe-list-b"></datalist>
+</form>
+<p class="note"><span id="pe-a-sector"></span> <span id="pe-b-sector"></span></p>
+<p class="note" id="pe-note" aria-live="polite"></p>
+<dl class="pair-stats" id="pe-stats"></dl>
+<h3 id="pe-px-title">Prices, rebased to 100</h3>
+<div id="pe-px" class="sim-chart" role="img" aria-label="Both stocks' prices rebased to 100 at the window start"></div>
+<h3>Spread: log A minus the fitted log B</h3>
+<div id="pe-spread" class="sim-chart" role="img" aria-label="The spread with its mean and one and two standard deviation bands"></div>
+<h3 id="pe-z-title">Z-score and the trading rule</h3>
+<div id="pe-z" class="sim-chart" role="img" aria-label="Rolling z-score of the spread with entry and exit levels"></div>
+<h3>Backtest: ₹1 traded on the rule</h3>
+<div id="pe-eq" class="sim-chart" role="img" aria-label="Growth of one rupee traded on the z-score rule, before and after costs"></div>
+<script>
+$js
+const PE = $data;
+(() => {
+  const el = (id) => document.getElementById(id);
+  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  // Undo the page's compact encoding: log price x scale, first value then day-to-day differences.
+  const logs = Object.fromEntries(Object.entries(PE.px).map(([k, v]) => {
+    let last = null;
+    return [k, v.map((d) => { if (d === null) return null; last = last === null ? d : last + d; return last / PE.scale; })];
+  }));
+  const known = new Set(PE.symbols);
+  const option = (s) => `<option value="${s}">${PE.sectors[s]}</option>`;
+  el("pe-list-a").innerHTML = PE.symbols.map(option).join("");
+  // Second stock: same-sector names first, then the rest.
+  const fillB = (a) => {
+    const same = PE.symbols.filter((s) => s !== a && PE.sectors[s] === PE.sectors[a]);
+    const rest = PE.symbols.filter((s) => s !== a && PE.sectors[s] !== PE.sectors[a]);
+    el("pe-list-b").innerHTML = same.concat(rest).map(option).join("");
+    return same;
+  };
+  el("pe-a").value = PE.default[0]; el("pe-b").value = PE.default[1]; fillB(PE.default[0]);
+  const f2 = (x) => x.toFixed(2).replace("-", "−"), pct = (x) => (x * 100).toFixed(1).replace("-", "−") + "%";
+  const rupees = (x) => "₹" + Math.round(x).toLocaleString("en-IN");
+  const num = (id, lo, hi, dflt) => { const v = parseFloat(el(id).value); return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt; };
+  const base = () => ({ paper_bgcolor: css("--surface"), plot_bgcolor: css("--surface"),
+    font: { family: getComputedStyle(document.body).fontFamily, color: css("--text-2"), size: 12 },
+    margin: { l: 56, r: 16, t: 32, b: 40 }, legend: { orientation: "h", y: 1.02, yanchor: "bottom", x: 0 },
+    hovermode: "x unified", xaxis: { gridcolor: css("--grid") } });
+  const hline = (y, color, dash) => ({ type: "line", xref: "paper", x0: 0, x1: 1, y0: y, y1: y, line: { color, width: 1, dash } });
+  const cfg = { displaylogo: false, responsive: true };
+  const charts = ["pe-px", "pe-spread", "pe-z", "pe-eq"];
+
+  const update = () => {
+    const a = el("pe-a").value.trim().toUpperCase(), b = el("pe-b").value.trim().toUpperCase();
+    for (const [s, id] of [[a, "pe-a-sector"], [b, "pe-b-sector"]]) {
+      el(id).textContent = known.has(s) ? `${s}: ${PE.sectors[s]}, lot ${PE.lots[s]}.` : "";
+    }
+    if (!known.has(a) || !known.has(b) || a === b) {
+      el("pe-note").textContent = a === b ? "Pick two different stocks." : `Pick both stocks from the list (${known.has(a) ? b : a || "blank"} is not an F&O stock here).`;
+      return;
+    }
+    const w = parseInt(el("pe-win").value, 10), look = Math.round(num("pe-look", 20, 250, 60));
+    const entry = num("pe-entry", 0.5, 4, 2), exit = Math.min(num("pe-exit", 0, 3, 0.5), entry), cost = num("pe-cost", 0, 50, 5) / 1e4;
+    const A = logs[a].slice(-w), B = logs[b].slice(-w), D = PE.dates.slice(-w);
+    const idx = D.map((_, i) => i).filter((i) => A[i] !== null && B[i] !== null);
+    if (idx.length < Math.max(120, look + 20)) {
+      el("pe-stats").innerHTML = ""; charts.forEach((c) => Plotly.purge(c));
+      el("pe-note").textContent = `Only ${idx.length} days with prices for both ${a} and ${b} in this window; pick a longer window or another pair.`;
+      return;
+    }
+    const la = idx.map((i) => A[i]), lb = idx.map((i) => B[i]), dates = idx.map((i) => D[i]);
+    const eg = engleGranger(la, lb, 1), s = spread(la, lb, eg.alpha, eg.beta);
+    const m = s.reduce((x, y) => x + y, 0) / s.length, sd = Math.sqrt(s.reduce((x, v) => x + (v - m) ** 2, 0) / (s.length - 1));
+    const z = zscore(s, look);
+    const net = backtest(la, lb, eg.beta, z, entry, exit, null, cost), gross = backtest(la, lb, eg.beta, z, entry, exit, null, 0);
+    const ra = la.slice(1).map((v, i) => Math.expm1(v - la[i])), rb = lb.slice(1).map((v, i) => Math.expm1(v - lb[i]));
+    const years = (Date.parse(dates[dates.length - 1]) - Date.parse(dates[0])) / (365.25 * 86400000);
+    const total = net.equity[net.equity.length - 1] - 1, perYear = Math.pow(1 + total, 1 / years) - 1;
+    const hl = eg.half_life === Infinity ? "none" : eg.half_life.toFixed(0);
+    const stats = [
+      ["Hedge ratio (β)", f2(eg.beta)],
+      ["ADF t-statistic", f2(eg.tstat)],
+      ["Engle-Granger p-value", eg.pvalue < 0.001 ? "<0.001" : eg.pvalue.toFixed(3)],
+      ["Half-life, trading days", hl],
+      ["Correlation of daily returns", f2(corr(ra, rb))],
+      ["Trades opened", String(net.trades)],
+      ["Return after costs, a year", pct(perYear)],
+      ["Costs, total", pct(gross.equity[gross.equity.length - 1] - net.equity[net.equity.length - 1])],
+    ];
+    el("pe-stats").innerHTML = stats.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+    const pxA = Math.exp(la[la.length - 1]), pxB = Math.exp(lb[lb.length - 1]);
+    const verdict = eg.pvalue < 0.05 ? "The spread has returned to its mean more reliably than chance would allow (p below 0.05)."
+      : "The test cannot tell this spread from one that wanders off for good (p of 0.05 or more), so a gap may not close.";
+    el("pe-note").textContent = `${a} against ${b}: ${idx.length} trading days to ${PE.last}. Long the spread means buying ₹1 of ${a} for every ₹${f2(Math.abs(eg.beta))} of ${b} ${eg.beta >= 0 ? "sold" : "bought"}, ` +
+      `scaled to ₹1 gross. ${verdict} One lot is about ${rupees(pxA * PE.lots[a])} of ${a} and ${rupees(pxB * PE.lots[b])} of ${b} at the latest close.`;
+
+    const ca = css("--accent"), cb = css("--accent-2"), t2 = css("--text-2"), mu = css("--muted");
+    el("pe-px-title").textContent = `${a} and ${b}, rebased to 100`;
+    el("pe-px").setAttribute("aria-label", `${a} and ${b} prices rebased to 100 at the window start`);
+    Plotly.react("pe-px", [
+      { x: dates, y: la.map((v) => 100 * Math.exp(v - la[0])), mode: "lines", line: { color: ca, width: 2 }, name: a, hovertemplate: "%{y:.1f}" },
+      { x: dates, y: lb.map((v) => 100 * Math.exp(v - lb[0])), mode: "lines", line: { color: cb, width: 2 }, name: b, hovertemplate: "%{y:.1f}" },
+    ], Object.assign(base(), { yaxis: { title: "price, start = 100", gridcolor: css("--grid") } }), cfg);
+    Plotly.react("pe-spread", [
+      { x: dates, y: s.map((v) => (v - m) * 100), mode: "lines", line: { color: ca, width: 1.5 }, name: "spread", hovertemplate: "%{y:.1f}%" },
+    ], Object.assign(base(), { showlegend: false, yaxis: { title: "spread from its mean, %", gridcolor: css("--grid"), zeroline: false },
+      shapes: [hline(0, t2), hline(sd * 100, mu, "dot"), hline(-sd * 100, mu, "dot"), hline(2 * sd * 100, t2, "dash"), hline(-2 * sd * 100, t2, "dash")] }), cfg);
+    el("pe-z-title").textContent = `Z-score over the past ${look} days, entry ±${f2(entry)}, exit ±${f2(exit)}`;
+    Plotly.react("pe-z", [
+      { x: dates, y: z, mode: "lines", line: { color: ca, width: 1.5 }, name: "z-score", hovertemplate: "%{y:.2f}" },
+      { x: dates, y: net.positions, mode: "lines", line: { color: cb, width: 1, shape: "hv" }, name: "position (+1 long, −1 short)", hovertemplate: "%{y}" },
+    ], Object.assign(base(), { yaxis: { title: "z-score", gridcolor: css("--grid"), zeroline: false },
+      shapes: [hline(entry, t2, "dash"), hline(-entry, t2, "dash"), hline(exit, mu, "dot"), hline(-exit, mu, "dot")] }), cfg);
+    Plotly.react("pe-eq", [
+      { x: dates, y: gross.equity, mode: "lines", line: { color: t2, width: 1.2, dash: "dash" }, name: "before costs", hovertemplate: "₹%{y:.3f}" },
+      { x: dates, y: net.equity, mode: "lines", line: { color: ca, width: 2 }, name: `after ${+(cost * 1e4).toFixed(2)} bp a side`, hovertemplate: "₹%{y:.3f}" },
+    ], Object.assign(base(), { yaxis: { title: "₹1 grown", gridcolor: css("--grid"), tickprefix: "₹" } }), cfg);
+  };
+  el("pe-a").addEventListener("change", () => {
+    const a = el("pe-a").value.trim().toUpperCase();
+    if (!known.has(a)) return update();
+    const same = fillB(a);
+    const b = el("pe-b").value.trim().toUpperCase();
+    // Keep B if it is a different stock in A's sector; otherwise suggest A's first sector peer.
+    if (b === a || PE.sectors[b] !== PE.sectors[a]) el("pe-b").value = same[0] || PE.symbols.find((s) => s !== a);
+    update();
+  });
+  el("pe").addEventListener("change", (e) => { if (e.target.id !== "pe-a") update(); });
+  el("pe").addEventListener("input", (e) => { if (e.target.type === "number") update(); });
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", update);
+  update();
+})();
+</script>
