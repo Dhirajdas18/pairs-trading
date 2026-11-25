@@ -152,3 +152,19 @@ def clean_prices(prices: pd.DataFrame, fixes: Path = FIXES) -> pd.DataFrame:
         if d is not None:
             out[s] = out[s] / out.at[d, s] * px.at[d, s]
     return out
+
+
+def lake_closes(symbols: list[str], lake_dir: str | Path | None = None) -> pd.DataFrame:
+    """Raw daily closes from a local NSE bhavcopy panel (PT_LAKE_DIR/panel.parquet), which keeps
+    stocks Yahoo has dropped after delisting. Not committed; used for event studies only."""
+    import os
+
+    lake_dir = lake_dir or os.environ.get("PT_LAKE_DIR")
+    if not lake_dir:
+        raise FileNotFoundError("set PT_LAKE_DIR to a bhavcopy lake folder with panel.parquet")
+    p = pd.read_parquet(
+        Path(lake_dir) / "panel.parquet",
+        columns=["date", "symbol", "close"],
+        filters=[("symbol", "in", symbols)],
+    )
+    return p.pivot_table(index="date", columns="symbol", values="close").sort_index()

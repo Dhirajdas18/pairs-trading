@@ -17,7 +17,7 @@ computed in your browser; rebuilt every week from fresh data by GitHub Actions.
 - [x] Spread, hedge ratio, z-score and half-life: fixed against rolling z-scores, half-life carry-over
 - [x] Finding pairs across the F&O list: luck rate by placebo, multiple-testing corrections, ranking and filters
 - [x] A z-score rule out of sample after stock-futures costs, monthly rolls and whole lots
-- [ ] When pairs break: stability checks and stop rules
+- [x] When pairs break: a merger, stop rules, a monthly health check, and early-warning signs
 - [ ] Kalman hedge ratio against a fixed one, out of sample
 - [ ] A portfolio of pairs against NIFTY after costs
 
@@ -135,17 +135,46 @@ legs at each month end.
   one lot of each stock misses the hedge ratio by a median 54%; getting within 10% needs a median
   ₹34 lakh of futures per pair, ₹7 crore for all 20.
 
+### 5. Stops cut the worst falls but cost more than they saved; breaks gave no warning
+
+<a href="docs/img/breaks_merger.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/breaks_merger.png"><img src="docs/img/breaks_merger.gif" alt="HDFC Ltd's price against 42/25 of HDFC Bank's, 2020 to July 2023, pinned after the merger announcement" width="720"></picture></a>
+
+<a href="docs/img/breaks_stops.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/breaks_stops.png"><img src="docs/img/breaks_stops.gif" alt="Return after costs and worst drawdown of the finding 4 strategy under seven stop rules and two health checks" width="720"></picture></a>
+
+The strategy of finding 4 is rerun with one rule added at a time. A stop closes the trade and blocks
+re-entry until |z| is back under 0.5: a z-score stop when |z| passes 3 or 4, a time stop after 20 or
+60 days held, a loss stop when the trade has lost 5% or 10% of its pair's capital. The health check
+retests each pair at every month end on its last 250 days and drops it for the year when p rises above
+0.5 or 0.2.
+
+- **A merger makes a perfect pair, then removes it.** After HDFC Ltd and HDFC Bank announced their
+  merger (4 Apr 2022, 42 HDFC Bank shares for 25 HDFC), HDFC's price stayed within −5.3% to +0.5% of
+  42/25 HDFC Bank's (standard deviation 1.0 points, against 5.8 before). HDFC Ltd was delisted after
+  12 Jul 2023 and Yahoo no longer has it, so a scan of today's tickers can't see the pair at all
+  (prices from a local NSE bhavcopy archive; not committed).
+- **Every stop cut the worst drawdown and the return.** From −16.6% and +1.4% a year with no stop: a
+  z-score stop at 3 gave −10.7% and +0.8%, a 5% loss stop −8.8% and +0.5%, a 20-day time stop −13.1%
+  and +0.2%. The best Sharpe, a 60-day time stop and the p > 0.5 health check (0.28 each), barely beat
+  no stop (0.26).
+- **Why stops hurt here:** a stop closes a trade when the gap is widest, which in a reverting pair is
+  just before it closes; it saves the trades that never come back and gives up those that do.
+- **No warning in the formation years.** Among cointegrated same-industry pairs, next-year first trades
+  were about the same across quartiles of how much the hedge ratio changed between the two formation
+  years (+1.6%, +0.5%, +1.0%, +1.3%) and of how far the spread drifted within them (+1.4%, +0.3%,
+  +1.0%, +1.5%).
+
 ## Quick start
 
 ```bash
 uv sync
 uv run python scripts/fetch_data.py         # Yahoo Finance -> data/prices.parquet
-uv run pt report cointegration              # also: spread, search, strategy
+uv run pt report cointegration              # also: spread, search, strategy, breaks
 uv run python scripts/build_site.py         # pair explorer -> site/index.html
 uv run pytest
 ```
 
-`scripts/fetch_constituents.py` refreshes the stock list (`docs/data/fno.csv`) from NSE's F&O lot
+The merger chart in finding 5 needs a local NSE bhavcopy archive (`PT_LAKE_DIR`, with
+`panel.parquet`); without it that report skips the chart. `scripts/fetch_constituents.py` refreshes the stock list (`docs/data/fno.csv`) from NSE's F&O lot
 sizes and NIFTY 500 industries.
 
 ## Design
@@ -160,7 +189,7 @@ sizes and NIFTY 500 industries.
 - `src/pt/spread.py`: hedge-ratio methods, rolling z-scores, first-trade test, half-life carry-over.
 - `src/pt/search.py`: whole-universe scan, placebo luck rate, Benjamini-Hochberg, pair selection.
 - `src/pt/strategy.py`: the out-of-sample strategy with next-day execution, futures carry, Zerodha
-  charges, slippage, monthly rolls, and whole-lot sizing.
+  charges, slippage, monthly rolls, whole-lot sizing, stop rules and a monthly health check.
 - `src/pt/site.py`: the pair explorer, one static Plotly page; no server, no committed price data.
 - `src/pt/reports.py`: README findings, reproducible with `pt report <topic>` (every number quoted
   above is printed by its report).

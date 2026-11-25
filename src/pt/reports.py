@@ -615,9 +615,148 @@ def report_strategy(out_dir: Path) -> dict:
     return res
 
 
+def report_breaks(out_dir: Path) -> dict:
+    """When pairs break: a merger that forced a pair together and then removed it, stop rules and a
+    monthly health check on the out-of-sample strategy, and whether formation data warns of
+    breaks."""
+    from pt.data import SECTORS, SYMBOLS, lake_closes
+    from pt.pairs import hedge_ratio
+    from pt.search import scan
+    from pt.strategy import run, summary
+
+    res = {}
+    # 1. HDFC Ltd into HDFC Bank: 42 HDFC Bank shares for 25 HDFC (announced 4 Apr 2022)
+    try:
+        cl = lake_closes(["HDFC", "HDFCBANK"]).loc["2020-01-01":].dropna()
+    except FileNotFoundError as e:
+        res["merger"] = f"skipped: {e}"
+    else:
+        gap = 100 * (cl["HDFC"] / (42 / 25 * cl["HDFCBANK"]) - 1)
+        before, after = gap.loc[:"2022-04-01"], gap.loc["2022-04-04":]
+        res["merger"] = (
+            f"HDFC price vs 42/25 HDFC Bank: before the announcement {before.min():+.1f}% to "
+            f"{before.max():+.1f}% (sd {before.std():.1f}); after, {after.min():+.1f}% to "
+            f"{after.max():+.1f}% (sd {after.std():.1f}); last day {gap.index[-1]:%d %b %Y}"
+        )
+        fig, ax = plt.subplots(figsize=(10, 4.2))
+        ax.plot(gap.index, gap, color=plots.SERIES[0], lw=1.3)
+        ax.axhline(0, color=plots.TEXT_2, lw=0.8)
+        ax.axvline(pd.Timestamp("2022-04-04"), color=plots.TEXT_2, lw=0.8, ls="--")
+        ax.text(
+            pd.Timestamp("2022-04-11"),
+            ax.get_ylim()[1] * 0.85,
+            "merger announced\n4 Apr 2022",
+            fontsize=8,
+            color=plots.TEXT_2,
+            va="top",
+        )
+        ax.set_ylabel("HDFC price vs 42/25 HDFC Bank, %")
+        ax.set_title(
+            "HDFC Ltd against HDFC Bank: a fixed swap ratio pinned the gap, then HDFC Ltd was "
+            "delisted (absent from Yahoo)",
+            fontsize=10,
+            fontweight="normal",
+            loc="left",
+        )
+        fig.tight_layout()
+        plots.save(fig, out_dir, "breaks_merger")
+
+    # 2. stops and a health check on the strategy
+    logp = np.log(prices()[SYMBOLS])
+    sc = scan(logp, SECTORS, range(2010, 2027))
+    picks = sc[sc["same_sector"]]
+    rules = {
+        "no stop (finding 4)": {},
+        "z-score stop at 3": {"stop_z": 3},
+        "z-score stop at 4": {"stop_z": 4},
+        "time stop 20 days": {"max_days": 20},
+        "time stop 60 days": {"max_days": 60},
+        "loss stop 5%": {"stop_loss": 0.05},
+        "loss stop 10%": {"stop_loss": 0.10},
+        "monthly check, drop if p > 0.5": {"health": 0.5},
+        "monthly check, drop if p > 0.2": {"health": 0.2},
+    }
+    out = {}
+    for k, kw in rules.items():
+        r = run(logp, picks, **kw)
+        s_ = summary(r["net"])
+        y = r.groupby("year")["net"].apply(lambda d: (1 + d).prod() - 1)
+        out[k] = s_ | {"worst year": float(y.min()), "years up": int((y > 0).sum())}
+        res[k] = (
+            f"net {s_['annual']:+.2%}, Sharpe {s_['sharpe']:.2f}, "
+            f"drawdown {s_['max drawdown']:.1%}, "
+            f"worst year {y.min():+.1%}, {int((y > 0).sum())} of {len(y)} years up"
+        )
+
+    names = list(rules)[::-1]
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.6), sharey=True)
+    for ax, key, lab, lim in (
+        (axes[0], "annual", "return above cash after costs, % a year", (-0.8, 2.2)),
+        (axes[1], "max drawdown", "worst drawdown, %", (-22, 0)),
+    ):
+        v = [100 * out[k][key] for k in names]
+        ax.barh(
+            names,
+            v,
+            height=0.55,
+            color=[plots.SERIES[0] if k.startswith("no stop") else plots.MUTED for k in names],
+        )
+        ax.axvline(0, color=plots.TEXT_2, lw=0.8)
+        for i, x in enumerate(v):
+            if key == "annual":
+                ax.text(
+                    x + (0.05 if x >= 0 else -0.05),
+                    i,
+                    f"{x:+.1f}%",
+                    va="center",
+                    ha="left" if x >= 0 else "right",
+                    fontsize=9,
+                    color=plots.TEXT,
+                )
+            else:  # bars run left from 0: label just past the bar's far end
+                ax.text(
+                    x - 0.3, i, f"{x:.0f}%", va="center", ha="right", fontsize=9, color=plots.TEXT
+                )
+        ax.set_xlim(*lim)
+        ax.set_xlabel(lab)
+    fig.suptitle(
+        "Stops cut the worst falls and cost more return than they saved", x=0.02, ha="left"
+    )
+    fig.tight_layout()
+    plots.save(fig, out_dir, "breaks_stops")
+
+    # 3. does formation data warn of a break? cointegrated same-industry pairs, by quartile
+    c = picks[picks["pvalue"] < 0.05].copy()
+    from pt.coint import windows
+
+    w = {y: f for y, f, _ in windows(logp, range(2010, 2027))}
+    db, drift = [], []
+    for r in c.itertuples():
+        f = w[r.year]
+        y1, y2 = f.loc[: f"{r.year - 2}-12-31"], f.loc[f"{r.year - 1}-01-01" :]
+        b1 = hedge_ratio(y1[r.a].to_numpy(), y1[r.b].to_numpy())[1]
+        b2 = hedge_ratio(y2[r.a].to_numpy(), y2[r.b].to_numpy())[1]
+        db.append(abs(b1 - b2) / max(abs(r.beta), 1e-6))
+        s_ = f[r.a].to_numpy() - r.beta * f[r.b].to_numpy()
+        h = len(s_) // 2
+        drift.append(abs(s_[h:].mean() - s_[:h].mean()) / s_.std())
+    c["hedge-ratio change between formation years"] = db
+    c["spread drift within formation"] = drift
+    for col in (
+        "hedge-ratio change between formation years",
+        "spread drift within formation",
+        "half_life",
+    ):
+        q = pd.qcut(c[col], 4, labels=False)
+        g = c.groupby(q)["gain60"].mean() * 100
+        res[f"by quartile of {col}"] = "first trade " + ", ".join(f"{v:+.1f}%" for v in g)
+    return res
+
+
 REPORTS: dict[str, Callable[[Path], dict]] = {
     "cointegration": report_cointegration,
     "spread": report_spread,
     "search": report_search,
     "strategy": report_strategy,
+    "breaks": report_breaks,
 }

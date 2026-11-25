@@ -53,6 +53,10 @@ def pair_returns(
     lag: int = 1,
     slippage: float = 0.0005,
     rolls: bool = True,
+    stop_z: float | None = None,
+    max_days: int | None = None,
+    stop_loss: float | None = None,
+    retired: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     """Daily returns above cash, before and after costs, of one pair over days `first`..end.
 
@@ -61,14 +65,21 @@ def pair_returns(
     The spread position decided at close t (from z_t) is traded at close t + `lag` and earns returns
     after that; it starts flat on the first test day and is closed by the last close. Long spread =
     weight 1 on A and -beta on B, scaled to a gross exposure of 1.
+    Stops (pt/05), each closing the trade and blocking re-entry until |z| < 0.5: `stop_z` when |z|
+    passes it, `max_days` after that many days held, `stop_loss` when the trade has lost that share
+    of the pair's capital. `retired` (bool per day) closes the pair for good from the first True.
     Returns (gross, net, trades) for the test days.
     """
     n = len(spread)
     z = rolling_z(spread, window)
     z[:first] = np.nan  # nothing is opened from formation-day signals
-    decided = positions(z, entry, exit) if exit > 0 else _cross_zero(z, entry)
-    held = np.zeros(n)
-    held[lag:] = decided[:-lag] if lag else decided
+    if stop_z is None and max_days is None and stop_loss is None and retired is None:
+        decided = positions(z, entry, exit) if exit > 0 else _cross_zero(z, entry)
+        held = np.zeros(n)
+        held[lag:] = decided[:-lag] if lag else decided
+    else:
+        unit = (ra - RF * dt - beta * (rb - RF * dt)) / (1 + abs(beta))
+        held = _with_stops(z, unit, entry, lag, stop_z, max_days, stop_loss, retired)
     held[: first + lag] = 0.0
     held[-1] = 0.0  # flat by the last close
     wa, wb = held / (1 + abs(beta)), -held * beta / (1 + abs(beta))
@@ -83,6 +94,58 @@ def pair_returns(
         cost += rolls * roll * np.abs(w) * (buy + sell)
     trades = int(np.sum((held != 0) & (np.r_[0.0, held[:-1]] != held)))
     return gross[first:], (gross - cost)[first:], trades
+
+
+def _with_stops(z, unit, entry, lag, stop_z, max_days, stop_loss, retired) -> np.ndarray:
+    """Held spread position per day for the exit-at-zero rule with stops; decisions at close t
+    use z_t and the trade's results up to t, and are held from close t + lag."""
+    n = len(z)
+    decided, held = np.zeros(n), np.zeros(n)
+    p, blocked, pnl, days, out_for_good = 0.0, False, 0.0, 0, False
+    for t in range(n):
+        held[t] = decided[t - lag] if t >= lag else 0.0
+        if t > 0 and held[t - 1] != 0:
+            pnl += held[t - 1] * unit[t]
+        if held[t] != 0 and (t == 0 or held[t] != held[t - 1]):
+            pnl, days = 0.0, 0
+        days += held[t] != 0
+        v = z[t]
+        if retired is not None and retired[t]:
+            out_for_good = True
+        if np.isnan(v) or out_for_good:
+            p, blocked = 0.0, False
+        elif blocked:
+            blocked = abs(v) >= 0.5
+        elif p == 0.0:
+            p = -1.0 if v > entry else 1.0 if v < -entry else 0.0
+        elif (p < 0 and v <= 0) or (p > 0 and v >= 0):
+            p = 0.0
+        elif (
+            (stop_z is not None and abs(v) > stop_z)
+            or (max_days is not None and days >= max_days)
+            or (stop_loss is not None and held[t] != 0 and pnl < -stop_loss)
+        ):
+            p, blocked = 0.0, True
+        decided[t] = p
+    return held
+
+
+def health_check(la, lb, first: int, month_end: np.ndarray, threshold: float, lookback=250):
+    """Retire a pair from the first month end in the test where Engle-Granger on the last
+    `lookback` days (hedge ratio refitted) gives p above `threshold`. Bool per day."""
+    from pt.pairs import engle_granger
+
+    out = np.zeros(len(la), bool)
+    for t in np.flatnonzero(month_end):
+        if t < first:
+            continue
+        if (
+            engle_granger(la[t - lookback + 1 : t + 1], lb[t - lookback + 1 : t + 1])["pvalue"]
+            > threshold
+        ):
+            out[t:] = True
+            break
+    return out
 
 
 def _cross_zero(z: np.ndarray, entry: float) -> np.ndarray:
@@ -105,6 +168,7 @@ def run(
     logp: pd.DataFrame,
     picks: pd.DataFrame,
     n: int = 20,
+    health: float | None = None,
     **kw,
 ) -> pd.DataFrame:
     """Daily portfolio returns above cash, gross and net, over every test year in `picks`.
@@ -130,6 +194,8 @@ def run(
         for r in chosen.itertuples():
             la, lb = px[r.a].ffill().to_numpy(), px[r.b].ffill().to_numpy()
             ra, rb = np.r_[0.0, np.expm1(np.diff(la))], np.r_[0.0, np.expm1(np.diff(lb))]
+            if health is not None:
+                kw["retired"] = health_check(la, lb, first, month_end, health)
             g_, n_, k = pair_returns(la - r.beta * lb, ra, rb, r.beta, first, dt, month_end, **kw)
             gross += np.nan_to_num(g_) / n
             net += np.nan_to_num(n_) / n

@@ -64,3 +64,24 @@ def test_lots_needed_finds_the_smallest_close_match():
     assert (r["lots_a"], r["lots_b"], r["error"]) == (1, 1, 0.0)
     r = lots_needed(0.5, 400_000, 1_000_000)  # need ₹0.5 of B per ₹1 of A
     assert abs(r["error"]) <= 0.10 and r["lots_a"] >= 2
+
+
+def test_stops_path_with_no_stop_triggering_matches_the_plain_rule():
+    from pt.strategy import pair_returns
+
+    la, lb, ra, rb, dt, me, first = _setup()
+    g0, n0, k0 = pair_returns(la - lb, ra, rb, 1.0, first, dt, me, window=20)
+    g1, n1, k1 = pair_returns(la - lb, ra, rb, 1.0, first, dt, me, window=20, stop_z=1e9)
+    assert np.allclose(g0, g1) and k0 == k1
+
+
+def test_retired_pair_stays_flat_and_time_stop_shortens_trades():
+    from pt.strategy import pair_returns
+
+    la, lb, ra, rb, dt, me, first = _setup()
+    ret = np.zeros(len(la), bool)
+    ret[first:] = True
+    g, _, k = pair_returns(la - lb, ra, rb, 1.0, first, dt, me, window=20, retired=ret)
+    assert k == 0 and np.all(g == 0)
+    _, _, k_short = pair_returns(la - lb, ra, rb, 1.0, first, dt, me, window=20, max_days=2)
+    assert k_short >= 1
