@@ -15,7 +15,7 @@ computed in your browser; rebuilt every week from fresh data by GitHub Actions.
 
 - [x] Correlation against cointegration: which one picks pairs whose gap closes the next year
 - [x] Spread, hedge ratio, z-score and half-life: fixed against rolling z-scores, half-life carry-over
-- [ ] Finding pairs across the F&O list, and how many pass by luck
+- [x] Finding pairs across the F&O list: luck rate by placebo, multiple-testing corrections, ranking and filters
 - [ ] A z-score rule out of sample after stock-futures costs and lot sizes
 - [ ] When pairs break: stability checks and stop rules
 - [ ] Kalman hedge ratio against a fixed one, out of sample
@@ -80,12 +80,39 @@ before costs.
 - **Half-life doubles.** Cointegrated pairs: median 13 days on the fitting years, 29 the next year; the
   rank correlation between the two was 0.14.
 
+### 3. Half the passes are luck; a short list of each industry's strongest pairs works best
+
+<table><tr>
+<td><a href="docs/img/search_luck.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/search_luck.png"><img src="docs/img/search_luck.gif" alt="P-value distribution of real same-industry pairs against the same pairs with the link broken"></picture></a></td>
+<td><a href="docs/img/search_picks.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/search_picks.png"><img src="docs/img/search_picks.gif" alt="Next-year first-trade gain and gap-closing rate for seven ways of picking pairs"></picture></a></td>
+</tr></table>
+
+Every pair of the F&O list (232,393 pair-years, 2010–2026; 22,139 within an industry) is fitted on two
+calendar years and scored on the next, as in findings 1 and 2. The luck rate comes from a placebo: each
+same-industry pair is retested after rotating stock B's daily returns by a random offset, which keeps
+B's volatility and calm and stormy spells but breaks any link with A.
+
+- **Half the passes are luck.** With the link broken, 5.7% of pairs still had p < 0.05 (the test runs a
+  little loose against 5%). Real same-industry pairs passed 10.7% of the time, so about half their
+  passes are luck; across industries 9.1% passed, about 63% luck.
+- **Formal corrections backfired.** Benjamini-Hochberg at 5% kept 15 pairs a year, 96 of its 120 in
+  2010–11, and their first trades averaged −0.35%; Bonferroni kept 3 a year and averaged −4.9%. The very
+  lowest p-values bunched in years when whole sectors moved together.
+- **A short list worked best.** The 20 lowest p-values in each year, within industries, closed 57% of
+  opened gaps and averaged +2.0% a first trade (positive in 12 of 17 years; worst 2011, −3.9%). Shorter
+  lists did better (5: +2.5%, 10: +1.9%, 50: +1.2%, 100: +0.9%).
+- **Stay within industries.** The 20 lowest p-values from any two stocks averaged +0.5%, and across
+  industries only −0.2%, though their gaps closed as often (61%, 58%).
+- **Extra filters barely helped.** Among same-industry pairs with p < 0.05, a hedge ratio between 0.5
+  and 2 averaged +1.4% against +0.6% outside it; a half-life of 5–60 days excluded only 3 of 2,375; return
+  correlation above 0.5 did worse (+0.5% against +1.2%).
+
 ## Quick start
 
 ```bash
 uv sync
 uv run python scripts/fetch_data.py         # Yahoo Finance -> data/prices.parquet
-uv run pt report cointegration              # also: spread
+uv run pt report cointegration              # also: spread, search
 uv run python scripts/build_site.py         # pair explorer -> site/index.html
 uv run pytest
 ```
@@ -103,6 +130,7 @@ sizes and NIFTY 500 industries.
 - `src/pt/pairs.js`: a line-for-line browser copy of `pairs.py`, tested against Python through Node.
 - `src/pt/coint.py`: formation/test windows and the correlation-against-cointegration study.
 - `src/pt/spread.py`: hedge-ratio methods, rolling z-scores, first-trade test, half-life carry-over.
+- `src/pt/search.py`: whole-universe scan, placebo luck rate, Benjamini-Hochberg, pair selection.
 - `src/pt/site.py`: the pair explorer, one static Plotly page; no server, no committed price data.
 - `src/pt/reports.py`: README findings, reproducible with `pt report <topic>` (every number quoted
   above is printed by its report).

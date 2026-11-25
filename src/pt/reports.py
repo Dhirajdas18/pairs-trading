@@ -329,7 +329,155 @@ def report_spread(out_dir: Path) -> dict:
     return res
 
 
+def report_search(out_dir: Path) -> dict:
+    """Searching the whole F&O list: the luck rate of the cointegration test, multiple-testing
+    corrections, ranking, industry and extra filters, all scored on the next year."""
+    from pt.coint import windows
+    from pt.data import SECTORS, SYMBOLS
+    from pt.search import bh_reject, outcomes, placebo_pvalues, scan
+
+    res = {}
+    logp = np.log(prices()[SYMBOLS])
+    sc = scan(logp, SECTORS, range(2010, 2027))
+    same, cross = sc[sc["same_sector"]], sc[~sc["same_sector"]]
+    placebo = np.concatenate(
+        [
+            placebo_pvalues(f, list(zip(d["a"], d["b"], strict=True)), seed=y)
+            for y, f, _ in windows(logp, range(2010, 2027))
+            for d in [same[same["year"] == y]]
+        ]
+    )
+    luck = (placebo < 0.05).mean()
+    res["pair-years"] = f"{len(sc)} ({len(same)} same industry), 2010-2026"
+    res["share p < 0.05"] = (
+        f"placebo {luck:.1%}, same industry {(same['pvalue'] < 0.05).mean():.1%}, "
+        f"across industries {(cross['pvalue'] < 0.05).mean():.1%}"
+    )
+    res["luck share of passes"] = (
+        f"same industry {luck / (same['pvalue'] < 0.05).mean():.0%}, across "
+        f"{luck / (cross['pvalue'] < 0.05).mean():.0%}"
+    )
+
+    def bh(d):
+        keep = pd.Series(False, index=d.index)
+        for _, g in d.groupby("year"):
+            keep[g.index] = bh_reject(g["pvalue"].to_numpy())
+        return d[keep]
+
+    def top(d, n):
+        return d.sort_values("pvalue").groupby("year").head(n)
+
+    m = same.groupby("year")["pvalue"].transform("size")
+    picks = {
+        "all same-industry pairs": same,
+        "same industry, p < 0.05": same[same["pvalue"] < 0.05],
+        "Benjamini-Hochberg 5%": bh(same),
+        "Bonferroni 5%": same[same["pvalue"] < 0.05 / m],
+        "20 lowest p, same industry": top(same, 20),
+        "20 lowest p, any two stocks": top(sc, 20),
+        "20 lowest p, across industries": top(cross, 20),
+    }
+    table = {k: outcomes(v) for k, v in picks.items()}
+    for k, o in table.items():
+        res[k] = (
+            f"{o['per year']:.0f} a year, closed once opened {o['closed once opened']:.0%}, first "
+            f"trade {100 * o['first trade (60-day z)']:+.2f}% (won {o['won']:.0%})"
+        )
+    bh_years = bh(same).groupby("year").size()
+    res["BH survivors by year"] = ", ".join(f"{y}: {n}" for y, n in bh_years.items())
+    t20 = top(same, 20).groupby("year")["gain60"].mean()
+    res["20 lowest p, same industry, by year"] = (
+        f"positive in {(t20 > 0).sum()} of {len(t20)}; worst {t20.idxmin()} {100 * t20.min():+.1f}%"
+    )
+    for n in (5, 10, 50, 100):
+        o = outcomes(top(same, n))
+        res[f"{n} lowest p, same industry"] = (
+            f"closed {o['closed once opened']:.0%}, first trade "
+            f"{100 * o['first trade (60-day z)']:+.2f}%"
+        )
+    c = same[same["pvalue"] < 0.05]
+    for name, mask in {
+        "hedge ratio 0.5-2": c["beta"].between(0.5, 2),
+        "half-life 5-60 days": c["half_life"].between(5, 60),
+        "return correlation > 0.5": c["corr"] > 0.5,
+    }.items():
+        a, b = outcomes(c[mask]), outcomes(c[~mask])
+        res[f"p < 0.05 and {name}"] = (
+            f"{a['pair-years']} in: {100 * a['first trade (60-day z)']:+.2f}%, "
+            f"{b['pair-years']} out: {100 * b['first trade (60-day z)']:+.2f}%"
+        )
+
+    # chart 1: p-values with no link vs real pairs
+    fig, ax = plt.subplots(figsize=(8, 4.4))
+    bins = np.linspace(0, 1, 21)
+    hp, _ = np.histogram(placebo, bins)
+    hs, _ = np.histogram(same["pvalue"], bins)
+    x = bins[:-1] + 0.025
+    ax.bar(
+        x - 0.011,
+        100 * hs / hs.sum(),
+        0.02,
+        color=plots.SERIES[0],
+        label="real same-industry pairs",
+    )
+    ax.bar(
+        x + 0.011,
+        100 * hp / hp.sum(),
+        0.02,
+        color=plots.MUTED,
+        label="same pairs with the link broken (luck only)",
+    )
+    ax.axhline(5, color=plots.TEXT_2, lw=0.8, ls="--")
+    ax.set_xlabel("Engle-Granger p-value")
+    ax.set_ylabel("share of pair-years, %")
+    ax.set_title(
+        f"Below 0.05: {(same['pvalue'] < 0.05).mean():.1%} of real pairs, {luck:.1%} by luck alone "
+        f"({len(same):,} pair-years)",
+        fontsize=10,
+        fontweight="normal",
+        loc="left",
+    )
+    ax.legend(fontsize=8, loc="upper right")
+    fig.tight_layout()
+    plots.save(fig, out_dir, "search_luck")
+
+    # chart 2: how pairs were picked -> next-year first trade and closing rate
+    names = list(table)[::-1]
+    gains = [100 * table[k]["first trade (60-day z)"] for k in names]
+    closes = [100 * table[k]["closed once opened"] for k in names]
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.4), sharey=True)
+    col = [plots.SERIES[0] if k == "20 lowest p, same industry" else plots.MUTED for k in names]
+    axes[0].barh(names, gains, color=col, height=0.55)
+    axes[0].axvline(0, color=plots.TEXT_2, lw=0.8)
+    for i, v in enumerate(gains):
+        axes[0].text(
+            v + (0.1 if v >= 0 else -0.1),
+            i,
+            f"{v:+.1f}%",
+            va="center",
+            ha="left" if v >= 0 else "right",
+            fontsize=9,
+            color=plots.TEXT,
+        )
+    axes[0].set_xlim(-7.5, 3.5)
+    axes[0].set_xlabel("average first trade, % before costs")
+    axes[1].barh(names, closes, color=col, height=0.55)
+    for i, v in enumerate(closes):
+        axes[1].text(v + 1, i, f"{v:.0f}%", va="center", fontsize=9, color=plots.TEXT)
+    axes[1].set_xlim(0, 75)
+    axes[1].set_xlabel("gaps that closed after opening to 2 sd, %")
+    fig.suptitle(
+        "Next year: a short list of each industry's strongest pairs beat formal significance tests",
+        x=0.02,
+        ha="left",
+    )
+    fig.tight_layout()
+    plots.save(fig, out_dir, "search_picks")
+    return res
+
+
 REPORTS: dict[str, Callable[[Path], dict]] = {
     "cointegration": report_cointegration,
     "spread": report_spread,
+    "search": report_search,
 }
