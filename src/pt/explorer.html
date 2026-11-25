@@ -42,7 +42,11 @@ const PE = $data;
     el("pe-list-b").innerHTML = same.concat(rest).map(option).join("");
     return same;
   };
-  el("pe-a").value = PE.default[0]; el("pe-b").value = PE.default[1]; fillB(PE.default[0]);
+  // The pair lives in the address (#a=HDFCBANK&b=ICICIBANK) so a view can be bookmarked or shared.
+  const fromHash = new URLSearchParams(location.hash.slice(1));
+  const startA = (fromHash.get("a") || "").toUpperCase(), startB = (fromHash.get("b") || "").toUpperCase();
+  const [a0, b0] = known.has(startA) && known.has(startB) && startA !== startB ? [startA, startB] : PE.default;
+  el("pe-a").value = a0; el("pe-b").value = b0; fillB(a0);
   const f2 = (x) => x.toFixed(2).replace("-", "−"), pct = (x) => (x * 100).toFixed(1).replace("-", "−") + "%";
   const rupees = (x) => "₹" + Math.round(x).toLocaleString("en-IN");
   const num = (id, lo, hi, dflt) => { const v = parseFloat(el(id).value); return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt; };
@@ -63,6 +67,7 @@ const PE = $data;
       el("pe-note").textContent = a === b ? "Pick two different stocks." : `Pick both stocks from the list (${known.has(a) ? b : a || "blank"} is not an F&O stock here).`;
       return;
     }
+    history.replaceState(null, "", `#a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`);
     const w = parseInt(el("pe-win").value, 10), look = Math.round(num("pe-look", 20, 250, 60));
     const entry = num("pe-entry", 0.5, 4, 2), exit = Math.min(num("pe-exit", 0, 3, 0.5), entry), cost = num("pe-cost", 0, 50, 5) / 1e4;
     const A = logs[a].slice(-w), B = logs[b].slice(-w), D = PE.dates.slice(-w);
