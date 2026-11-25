@@ -476,8 +476,148 @@ def report_search(out_dir: Path) -> dict:
     return res
 
 
+def report_strategy(out_dir: Path) -> dict:
+    """The pairs strategy out of sample, 2010-2026, after stock-futures costs: the base rule chosen
+    in the spread and search findings, what costs take, how settings change it, and the capital
+    whole lots need today."""
+    from pt.data import CONSTITUENTS, SECTORS, SYMBOLS
+    from pt.search import scan
+    from pt.strategy import lots_needed, run, summary
+
+    res = {}
+    px = prices()
+    logp = np.log(px[SYMBOLS])
+    sc = scan(logp, SECTORS, range(2010, 2027))
+    picks = sc[sc["same_sector"]]
+    base = run(logp, picks)
+    g, n = summary(base["gross"]), summary(base["net"])
+    trades = base.groupby("year")["trades"].first()
+    yearly = base.groupby("year")["net"].apply(lambda d: (1 + d).prod() - 1)
+    res["base"] = (
+        "20 lowest p same-industry pairs a year, 60-day z, enter |z| > 2, exit at z = 0, next-day "
+        "execution, 5 bp slippage a side, monthly rolls"
+    )
+    res["gross, above cash"] = f"{g['annual']:+.2%} a year"
+    res["net, above cash"] = (
+        f"{n['annual']:+.2%} a year, volatility {n['vol']:.1%}, Sharpe {n['sharpe']:.2f}, worst "
+        f"drawdown {n['max drawdown']:.1%}, {trades.mean():.0f} trades a year"
+    )
+    res["net by year"] = ", ".join(f"{y} {100 * v:+.1f}%" for y, v in yearly.items())
+    yrs = (base.index[-1] - base.index[0]).days / 365.25
+    res["years positive"] = (
+        f"{(yearly > 0).sum()} of {len(yearly)}; Sharpe t-stat about "
+        f"{n['sharpe'] * np.sqrt(yrs):.1f} over {yrs:.1f} years"
+    )
+
+    def net(**kw):
+        return summary(run(logp, picks, **kw)["net"])
+
+    nothing = net(slippage=0.0, rolls=False)["annual"]
+    no_slip = net(slippage=0.0)["annual"] - n["annual"]
+    res["cost a year"] = (
+        f"{g['annual'] - n['annual']:.2%}: without slippage +{no_slip:.2%}"
+        f", without rolls +{net(rolls=False)['annual'] - n['annual']:.2%}, fees and STT on entries "
+        f"and exits alone {g['annual'] - nothing:.2%}"
+    )
+    variants = {
+        "base": {},
+        "same-day execution": {"lag": 0},
+        "slippage 2 bp": {"slippage": 0.0002},
+        "slippage 10 bp": {"slippage": 0.001},
+        "slippage 20 bp": {"slippage": 0.002},
+        "10 pairs": {"n": 10},
+        "50 pairs": {"n": 50},
+        "enter at 1.5": {"entry": 1.5},
+        "enter at 2.5": {"entry": 2.5},
+        "20-day z": {"window": 20},
+        "120-day z": {"window": 120},
+        "exit at |z| < 0.5": {"exit": 0.5},
+    }
+    vals = {}
+    for k, kw in variants.items():
+        s_ = net(**kw) if kw else n
+        vals[k] = s_
+        res[f"variant: {k}"] = (
+            f"net {s_['annual']:+.2%}, Sharpe {s_['sharpe']:.2f}, drawdown {s_['max drawdown']:.1%}"
+        )
+
+    lots = pd.read_csv(CONSTITUENTS).set_index("symbol")["lot"]
+    last = px[SYMBOLS].ffill().iloc[-1]
+    today = picks[picks["year"] == picks["year"].max()].nsmallest(20, "pvalue")
+    need, one = [], []
+    for r in today.itertuples():
+        va, vb = lots[r.a] * last[r.a], lots[r.b] * last[r.b]
+        need.append(lots_needed(r.beta, va, vb))
+        one.append(abs(vb / (r.beta * va) - 1))
+    notional = np.array([x["notional"] for x in need])
+    res["whole lots today"] = (
+        f"{len(need)} pairs picked for {today['year'].iloc[0]}, prices of {last.name:%d %b %Y}: "
+        f"one lot each misses the hedge ratio by a median {np.median(one):.0%} "
+        f"(up to {max(one):.0%}); "
+        f"within 10% needs a median ₹{np.median(notional) / 1e5:.0f} lakh of futures per pair, "
+        f"₹{notional.sum() / 1e7:.1f} crore for all"
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 4.4))
+    eq_g, eq_n = (1 + base["gross"]).cumprod(), (1 + base["net"]).cumprod()
+    ax.plot(eq_g.index, 100 * eq_g, color=plots.MUTED, lw=1.4)
+    ax.plot(eq_n.index, 100 * eq_n, color=plots.SERIES[0], lw=1.6)
+    plots.label_line_end(
+        ax, eq_g.index[-1], 100 * eq_g.iloc[-1], f"before costs {g['annual']:+.1%}/yr", plots.MUTED
+    )
+    plots.label_line_end(
+        ax,
+        eq_n.index[-1],
+        100 * eq_n.iloc[-1],
+        f"after costs {n['annual']:+.1%}/yr",
+        plots.SERIES[0],
+    )
+    ax.axhline(100, color=plots.TEXT_2, lw=0.8)
+    ax.set_ylabel("growth of 100 above cash")
+    ax.set_title(
+        f"20 pairs a year, traded the next day, 2010-2026: Sharpe {n['sharpe']:.2f} after costs, "
+        f"worst drawdown {n['max drawdown']:.0%}",
+        fontsize=10,
+        fontweight="normal",
+        loc="left",
+    )
+    ax.margins(x=0.12)
+    fig.tight_layout()
+    plots.save(fig, out_dir, "strategy_equity")
+
+    fig, ax = plt.subplots(figsize=(8, 5.2))
+    names = list(vals)[::-1]
+    v = [100 * vals[k]["annual"] for k in names]
+    ax.barh(
+        names, v, color=[plots.SERIES[0] if k == "base" else plots.MUTED for k in names], height=0.6
+    )
+    ax.axvline(0, color=plots.TEXT_2, lw=0.8)
+    for i, x in enumerate(v):
+        ax.text(
+            x + (0.08 if x >= 0 else -0.08),
+            i,
+            f"{x:+.1f}%",
+            va="center",
+            ha="left" if x >= 0 else "right",
+            fontsize=9,
+            color=plots.TEXT,
+        )
+    ax.set_xlim(-2.6, 3.6)
+    ax.set_xlabel("return above cash after costs, % a year")
+    ax.set_title(
+        "One setting changed at a time; picking the best one now would be hindsight",
+        fontsize=10,
+        fontweight="normal",
+        loc="left",
+    )
+    fig.tight_layout()
+    plots.save(fig, out_dir, "strategy_variants")
+    return res
+
+
 REPORTS: dict[str, Callable[[Path], dict]] = {
     "cointegration": report_cointegration,
     "spread": report_spread,
     "search": report_search,
+    "strategy": report_strategy,
 }

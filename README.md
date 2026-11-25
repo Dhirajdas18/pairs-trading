@@ -16,7 +16,7 @@ computed in your browser; rebuilt every week from fresh data by GitHub Actions.
 - [x] Correlation against cointegration: which one picks pairs whose gap closes the next year
 - [x] Spread, hedge ratio, z-score and half-life: fixed against rolling z-scores, half-life carry-over
 - [x] Finding pairs across the F&O list: luck rate by placebo, multiple-testing corrections, ranking and filters
-- [ ] A z-score rule out of sample after stock-futures costs and lot sizes
+- [x] A z-score rule out of sample after stock-futures costs, monthly rolls and whole lots
 - [ ] When pairs break: stability checks and stop rules
 - [ ] Kalman hedge ratio against a fixed one, out of sample
 - [ ] A portfolio of pairs against NIFTY after costs
@@ -107,12 +107,42 @@ B's volatility and calm and stormy spells but breaks any link with A.
   and 2 averaged +1.4% against +0.6% outside it; a half-life of 5–60 days excluded only 3 of 2,375; return
   correlation above 0.5 did worse (+0.5% against +1.2%).
 
+### 4. After futures costs the strategy kept 1.4% a year above cash, too little to tell from luck
+
+<a href="docs/img/strategy_equity.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/strategy_equity.png"><img src="docs/img/strategy_equity.gif" alt="Growth of 100 above cash for the 20-pair strategy before and after costs, 2010-2026" width="720"></picture></a>
+
+<table><tr>
+<td><a href="docs/img/strategy_variants.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/strategy_variants.png"><img src="docs/img/strategy_variants.gif" alt="Net return above cash for the base rule and eleven one-setting variants"></picture></a></td>
+</tr></table>
+
+The rule comes from findings 2 and 3, fixed before this test: each year, the 20 same-industry pairs with
+the lowest p-values on the two years before; enter when the 60-day z-score passes ±2, exit when it
+crosses 0, close everything at year end; each pair gets an equal share of capital. Signals at one close
+are traded at the next. Each leg is a stock future: the stock's dividend-inclusive return minus cash
+interest at 6.5%, so results are returns above cash. Costs are Zerodha's November 2026 futures charges
+(STT 0.05% on sales, ₹20 an order, exchange, stamp, GST), 5 bp slippage a side, and a full roll of both
+legs at each month end.
+
+- **Thin after costs.** +3.2% a year before costs, +1.4% after, with 5.9% volatility: a Sharpe of 0.26
+  (t about 1.1 over 17 years), worst drawdown −16.6%, 11 of 17 years positive (best 2014 +10.5%, worst
+  2016 −7.7%).
+- **Rolls and slippage are the cost, not STT.** Costs took 1.8 points a year. Dropping slippage would add
+  back 1.1, dropping the monthly rolls 1.0; STT and fees on entries and exits alone came to 0.3.
+- **Slippage decides it.** At 2 bp a side the rule kept +2.0%; at 10 bp +0.3%; at 20 bp it lost 1.7%
+  a year. Trading at the signalling close instead of the next would add 0.5.
+- **Settings moved it within a narrow band.** 10 pairs +2.5%, 50 pairs +0.5%; exiting at |z| < 0.5
+  +2.3%; entering at 1.5 or 2.5 +1.3% and +0.5%; 20 or 120-day z-scores +1.3% and +1.4%. These were
+  all seen on the same years, so picking the best now would be hindsight.
+- **Whole lots need real capital.** For the 20 pairs picked for 2026 at today's prices and lot sizes,
+  one lot of each stock misses the hedge ratio by a median 54%; getting within 10% needs a median
+  ₹34 lakh of futures per pair, ₹7 crore for all 20.
+
 ## Quick start
 
 ```bash
 uv sync
 uv run python scripts/fetch_data.py         # Yahoo Finance -> data/prices.parquet
-uv run pt report cointegration              # also: spread, search
+uv run pt report cointegration              # also: spread, search, strategy
 uv run python scripts/build_site.py         # pair explorer -> site/index.html
 uv run pytest
 ```
@@ -131,6 +161,8 @@ sizes and NIFTY 500 industries.
 - `src/pt/coint.py`: formation/test windows and the correlation-against-cointegration study.
 - `src/pt/spread.py`: hedge-ratio methods, rolling z-scores, first-trade test, half-life carry-over.
 - `src/pt/search.py`: whole-universe scan, placebo luck rate, Benjamini-Hochberg, pair selection.
+- `src/pt/strategy.py`: the out-of-sample strategy with next-day execution, futures carry, Zerodha
+  charges, slippage, monthly rolls, and whole-lot sizing.
 - `src/pt/site.py`: the pair explorer, one static Plotly page; no server, no committed price data.
 - `src/pt/reports.py`: README findings, reproducible with `pt report <topic>` (every number quoted
   above is printed by its report).

@@ -42,7 +42,7 @@ def rolling_z(s, window: int) -> np.ndarray:
     including t; same numbers as pt.pairs.zscore(s, window), vectorised."""
     x = pd.Series(np.asarray(s, float))
     r = x.rolling(window)
-    return ((x - r.mean()) / r.std(ddof=1)).to_numpy()
+    return ((x - r.mean()) / r.std(ddof=1)).to_numpy(copy=True)
 
 
 def _closed(z: np.ndarray) -> tuple[bool, bool]:

@@ -1,0 +1,178 @@
+"""A pairs strategy run out of sample with stock-futures costs.
+
+Each test year: take the `n` lowest Engle-Granger p-values among same-industry pairs fitted on the
+two years before (pt/03), trade each on a rolling z-score of its spread (pt/02), give every pair an
+equal slice of capital, and close everything on the year's last day.
+
+Futures legs: a stock future's return is approximated by the stock's dividend-inclusive return minus
+cash interest (the carry built into its price), so the strategy's return is what it earns above the
+cash the capital would sit in. Basis risk is left out.
+
+Costs (`FUT`): Zerodha's equity-futures charges as listed in November 2026 (the same figures as
+beta-capm's hedging study), applied to every year, plus slippage of half a bid-ask spread per side.
+Brokerage is ₹20 an order, entered as a rate on a ₹5 lakh order. Positions open at a month end are
+rolled to the next contract at a full round trip on both legs. Expiry is approximated by the last
+trading day of each month (NSE stock futures expire on the month's last Tuesday, Thursday before
+September 2025).
+"""
+
+import numpy as np
+import pandas as pd
+
+from pt.pairs import positions
+from pt.spread import rolling_z
+
+RF = 0.065  # cash rate, a year (91-day T-bills ran roughly 3-7% over 2009-2026)
+FUT = {
+    "stt_sell": 0.0005,
+    "exchange": 0.0000183,
+    "sebi": 0.000001,
+    "stamp_buy": 0.00002,
+    "brokerage": 20.0 / 500_000,  # ₹20 an order on a ₹5 lakh order
+    "gst": 0.18,
+}
+
+
+def side_rates(slippage: float = 0.0005) -> tuple[float, float]:
+    """Cost per rupee bought and per rupee sold of futures, slippage included."""
+    fees = (FUT["exchange"] + FUT["sebi"] + FUT["brokerage"]) * (1 + FUT["gst"])
+    return fees + FUT["stamp_buy"] + slippage, fees + FUT["stt_sell"] + slippage
+
+
+def pair_returns(
+    spread: np.ndarray,
+    ra: np.ndarray,
+    rb: np.ndarray,
+    beta: float,
+    first: int,
+    dt: np.ndarray,
+    month_end: np.ndarray,
+    window: int = 60,
+    entry: float = 2.0,
+    exit: float = 0.0,
+    lag: int = 1,
+    slippage: float = 0.0005,
+    rolls: bool = True,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Daily returns above cash, before and after costs, of one pair over days `first`..end.
+
+    `spread` covers formation and test days (formation first, so the rolling z can look back);
+    `ra`, `rb` are the legs' simple returns into each day; `dt` years since the previous close.
+    The spread position decided at close t (from z_t) is traded at close t + `lag` and earns returns
+    after that; it starts flat on the first test day and is closed by the last close. Long spread =
+    weight 1 on A and -beta on B, scaled to a gross exposure of 1.
+    Returns (gross, net, trades) for the test days.
+    """
+    n = len(spread)
+    z = rolling_z(spread, window)
+    z[:first] = np.nan  # nothing is opened from formation-day signals
+    decided = positions(z, entry, exit) if exit > 0 else _cross_zero(z, entry)
+    held = np.zeros(n)
+    held[lag:] = decided[:-lag] if lag else decided
+    held[: first + lag] = 0.0
+    held[-1] = 0.0  # flat by the last close
+    wa, wb = held / (1 + abs(beta)), -held * beta / (1 + abs(beta))
+    gross = np.zeros(n)
+    gross[1:] = wa[:-1] * (ra[1:] - RF * dt[1:]) + wb[:-1] * (rb[1:] - RF * dt[1:])
+    buy, sell = side_rates(slippage)
+    cost = np.zeros(n)
+    for w in (wa, wb):
+        d = np.diff(w, prepend=0.0)
+        cost += np.where(d > 0, d * buy, -d * sell)
+        roll = month_end & (np.abs(w) > 0) & (np.r_[np.abs(w[1:]), 0.0] > 0)
+        cost += rolls * roll * np.abs(w) * (buy + sell)
+    trades = int(np.sum((held != 0) & (np.r_[0.0, held[:-1]] != held)))
+    return gross[first:], (gross - cost)[first:], trades
+
+
+def _cross_zero(z: np.ndarray, entry: float) -> np.ndarray:
+    """Positions for exit at the mean: short above +entry, long below -entry, flat once z has
+    crossed zero (changed sign) since entry. NaN z = flat."""
+    out = np.zeros(len(z))
+    p = 0.0
+    for t, v in enumerate(z):
+        if np.isnan(v):
+            p = 0.0
+        elif p == 0.0:
+            p = -1.0 if v > entry else 1.0 if v < -entry else 0.0
+        elif (p < 0 and v <= 0) or (p > 0 and v >= 0):
+            p = 0.0
+        out[t] = p
+    return out
+
+
+def run(
+    logp: pd.DataFrame,
+    picks: pd.DataFrame,
+    n: int = 20,
+    **kw,
+) -> pd.DataFrame:
+    """Daily portfolio returns above cash, gross and net, over every test year in `picks`.
+
+    `picks`: one row per candidate pair-year with year, a, b, beta, pvalue (pt.search.scan rows,
+    same industry). Each year the `n` lowest p-values are traded with 1/n of capital each; empty
+    slots sit in cash (0 above cash).
+    """
+    out = []
+    for year, g in picks.groupby("year"):
+        chosen = g.nsmallest(n, "pvalue")
+        f0 = pd.Timestamp(year - 2, 1, 1)
+        t0, t1 = pd.Timestamp(year, 1, 1), pd.Timestamp(year, 12, 31)
+        px = logp.loc[f0:t1]
+        test_idx = px.loc[t0:].index
+        first = len(px) - len(test_idx)
+        dt = np.r_[0.0, np.diff(px.index.values).astype("timedelta64[D]").astype(float) / 365.0]
+        month = px.index.to_period("M")
+        month_end = np.r_[month[1:] != month[:-1], False]
+        gross = np.zeros(len(test_idx))
+        net = np.zeros(len(test_idx))
+        trades = 0
+        for r in chosen.itertuples():
+            la, lb = px[r.a].ffill().to_numpy(), px[r.b].ffill().to_numpy()
+            ra, rb = np.r_[0.0, np.expm1(np.diff(la))], np.r_[0.0, np.expm1(np.diff(lb))]
+            g_, n_, k = pair_returns(la - r.beta * lb, ra, rb, r.beta, first, dt, month_end, **kw)
+            gross += np.nan_to_num(g_) / n
+            net += np.nan_to_num(n_) / n
+            trades += k
+        out.append(
+            pd.DataFrame({"gross": gross, "net": net, "year": year}, index=test_idx).assign(
+                trades=trades
+            )
+        )
+    return pd.concat(out)
+
+
+def lots_needed(
+    beta: float, value_a: float, value_b: float, tol: float = 0.10, max_lots: int = 100
+) -> dict:
+    """Smallest whole-lot position (n_a lots of A, n_b of B) whose rupee ratio B : A is within
+    `tol` of the hedge ratio `beta`; value_a, value_b are one lot's rupee value."""
+    best = None
+    for na in range(1, max_lots + 1):
+        nb = max(1, round(beta * na * value_a / value_b))
+        err = nb * value_b / (beta * na * value_a) - 1
+        if best is None or abs(err) < abs(best[2]):
+            best = (na, nb, err)
+        if abs(err) <= tol:
+            return {
+                "lots_a": na,
+                "lots_b": nb,
+                "error": err,
+                "notional": na * value_a + nb * value_b,
+            }
+    na, nb, err = best
+    return {"lots_a": na, "lots_b": nb, "error": err, "notional": na * value_a + nb * value_b}
+
+
+def summary(r: pd.Series) -> dict:
+    """Annual return (calendar time), volatility, Sharpe, worst drawdown of daily returns."""
+    years = (r.index[-1] - r.index[0]).days / 365.25
+    eq = (1 + r).cumprod()
+    vol = r.std() * np.sqrt(len(r) / years)
+    ann = eq.iloc[-1] ** (1 / years) - 1
+    return {
+        "annual": float(ann),
+        "vol": float(vol),
+        "sharpe": float(r.mean() * len(r) / years / vol) if vol > 0 else np.nan,
+        "max drawdown": float((eq / eq.cummax() - 1).min()),
+    }
