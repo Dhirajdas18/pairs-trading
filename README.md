@@ -111,9 +111,7 @@ B's volatility and calm and stormy spells but breaks any link with A.
 
 <a href="docs/img/strategy_equity.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/strategy_equity.png"><img src="docs/img/strategy_equity.gif" alt="Growth of 100 above cash for the 20-pair strategy before and after costs, 2010-2026" width="720"></picture></a>
 
-<table><tr>
-<td><a href="docs/img/strategy_variants.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/strategy_variants.png"><img src="docs/img/strategy_variants.gif" alt="Net return above cash for the base rule and eleven one-setting variants"></picture></a></td>
-</tr></table>
+<a href="docs/img/strategy_variants.png"><picture><source media="(prefers-reduced-motion: reduce)" srcset="docs/img/strategy_variants.png"><img src="docs/img/strategy_variants.gif" alt="Net return above cash for the base rule and eleven one-setting variants" width="560"></picture></a>
 
 The rule comes from findings 2 and 3, fixed before this test: each year, the 20 same-industry pairs with
 the lowest p-values on the two years before; enter when the 60-day z-score passes ±2, exit when it
