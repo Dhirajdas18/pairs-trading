@@ -13,6 +13,16 @@ Pick two stocks and a window: the page fits the hedge ratio in your browser and 
 cointegration test, the spread's half-life, the correlation of daily returns, the spread and its
 z-score, and a z-score rule backtest before and after costs. Rebuilt weekly from fresh prices.
 
+## Features
+
+- [x] Correlation against cointegration: Engle-Granger test matched to statsmodels; which one picks pairs whose gap closes the next year, out of sample 2010-2026; live pair explorer tested against Python through Node
+- [ ] Spread, hedge ratio, z-score and half-life
+- [ ] Finding pairs across the F&O list, and how many pass by luck
+- [ ] A z-score rule out of sample after stock-futures costs and lot sizes
+- [ ] When pairs break: stability checks and stop rules
+- [ ] Kalman hedge ratio against a fixed one, out of sample
+- [ ] A portfolio of pairs against NIFTY after costs
+
 ## Run it
 
 ```sh
